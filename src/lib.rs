@@ -15,32 +15,33 @@ mod imp {
     };
 
     #[derive(Default)]
-    pub struct LottieAnimation {
+    pub struct Animation {
         animation: RefCell<Option<rlottie::Animation>>,
         frame_num: Cell<usize>,
         frame_delay: Cell<f64>,
         totalframe: Cell<usize>,
-        intrinsic: Cell<(i32, i32, f64)>,
-        cache: RefCell<Vec<gdk::MemoryTexture>>,
+        cache: RefCell<Vec<Option<gdk::MemoryTexture>>>,
         last_cache_use: Cell<Option<std::time::Instant>>,
+        first_play: Cell<bool>,
 
         pub(super) size: Cell<(i32, i32)>,
 
         // fields for properties
         use_cache: Cell<bool>,
+        reversed: Cell<bool>,
         width: Cell<i32>,
         height: Cell<i32>,
     }
 
     #[glib::object_subclass]
-    impl ObjectSubclass for LottieAnimation {
-        const NAME: &'static str = "ContentLottieAnimation";
-        type Type = super::LottieAnimation;
+    impl ObjectSubclass for Animation {
+        const NAME: &'static str = "LottieAnimation";
+        type Type = super::Animation;
         type ParentType = gtk::MediaFile;
         type Interfaces = (gdk::Paintable,);
     }
 
-    impl ObjectImpl for LottieAnimation {
+    impl ObjectImpl for Animation {
         fn constructed(&self, obj: &Self::Type) {
             self.parent_constructed(obj);
             self.use_cache.set(true);
@@ -49,13 +50,19 @@ mod imp {
         fn properties() -> &'static [glib::ParamSpec] {
             static PROPERTIES: Lazy<Vec<glib::ParamSpec>> = Lazy::new(|| {
                 vec![
-                    // glib::ParamSpecU
                     glib::ParamSpecBoolean::new(
                         "use-cache",
                         "Use cache",
                         "Do not use cache for animations that plays rarely",
                         true,
-                        glib::ParamFlags::WRITABLE,
+                        glib::ParamFlags::READWRITE,
+                    ),
+                    glib::ParamSpecBoolean::new(
+                        "reversed",
+                        "Reversed",
+                        "Reversed frame order",
+                        false,
+                        glib::ParamFlags::READWRITE,
                     ),
                     glib::ParamSpecInt::new(
                         "width",
@@ -75,6 +82,15 @@ mod imp {
                         0,
                         glib::ParamFlags::READWRITE,
                     ),
+                    glib::ParamSpecDouble::new(
+                        "progress",
+                        "Progress",
+                        "Set progress of the animation",
+                        0.0,
+                        1.0,
+                        0.0,
+                        glib::ParamFlags::READWRITE,
+                    ),
                 ]
             });
             PROPERTIES.as_ref()
@@ -83,15 +99,19 @@ mod imp {
         fn property(&self, _obj: &Self::Type, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
             match pspec.name() {
                 "use-cache" => self.use_cache.get().to_value(),
+                "reversed" => self.reversed.get().to_value(),
                 "width" => self.width.get().to_value(),
                 "height" => self.height.get().to_value(),
+                "progress" => {
+                    (self.frame_num.get() as f64 / (self.totalframe.get() - 1) as f64).to_value()
+                }
                 _ => unimplemented!(),
             }
         }
 
         fn set_property(
             &self,
-            _obj: &Self::Type,
+            obj: &Self::Type,
             _id: usize,
             value: &glib::Value,
             pspec: &glib::ParamSpec,
@@ -100,13 +120,10 @@ mod imp {
                 "use-cache" => {
                     let use_cache = value.get().unwrap();
                     self.use_cache.set(use_cache);
-                    if use_cache {
-                        self.cache.take();
-                        self.frame_num.set(0);
-                    } else {
-                        self.cache.borrow_mut().truncate(1);
-                    }
-                    dbg!(value);
+                    self.cache.replace(vec![None; self.totalframe.get()]);
+                }
+                "reversed" => {
+                    self.reversed.set(value.get().unwrap());
                 }
                 "width" => {
                     self.width.set(value.get().unwrap());
@@ -116,40 +133,40 @@ mod imp {
                     self.height.set(value.get().unwrap());
                     self.update_size()
                 }
+                "progress" => {
+                    let progress: f64 = value.get().unwrap();
+                    let frame_num = ((self.totalframe.get() - 1) as f64 * progress) as usize;
+                    self.frame_num.set(frame_num);
+                    obj.invalidate_contents();
+                }
                 _ => unimplemented!(),
             }
         }
     }
 
-    impl MediaFileImpl for LottieAnimation {
+    impl MediaFileImpl for Animation {
         fn open(&self, media_file: &Self::Type) {
             if let Some(file) = media_file.file() {
-                let path = file.path().unwrap();
-                let animation = match path
-                    .extension()
-                    .unwrap_or_default()
-                    .to_str()
-                    .unwrap_or_default()
-                {
-                    "json" => rlottie::Animation::from_file(path)
-                        .expect("LottieAnimation: can't open animation"),
-                    "tgs" => {
-                        let data = file.load_contents(gio::Cancellable::NONE).unwrap().0;
+                let path = file.path().expect("file not found");
+                let cache_key = path.file_name().unwrap().to_str().unwrap().to_owned();
 
-                        let mut gz = GzDecoder::new(&*data);
+                let animation = {
+                    match rlottie::Animation::from_file(path) {
+                        Some(animation) => animation,
+                        _ => {
+                            let data = file.load_contents(gio::Cancellable::NONE).unwrap().0;
 
-                        let mut buf = String::new();
+                            let mut gz = GzDecoder::new(&*data);
+                            let mut buf = String::new();
 
-                        gz.read_to_string(&mut buf).expect("can't read file");
-
-                        rlottie::Animation::from_data(
-                            buf,
-                            path.file_name().unwrap().to_str().unwrap(),
-                            "",
-                        )
-                        .expect("LottieAnimation: create tgs animation")
+                            if gz.read_to_string(&mut buf).is_ok() {
+                                rlottie::Animation::from_data(buf, cache_key, "")
+                                    .expect("LottieAnimation: unsupporded file type")
+                            } else {
+                                unimplemented!("LottieAnimation: unsupporded file type")
+                            }
+                        }
                     }
-                    _ => panic!("LottieAnimation: unsupporded file type"),
                 };
 
                 let was_playing = media_file.is_playing();
@@ -158,8 +175,13 @@ mod imp {
                 self.frame_num.set(0);
 
                 self.frame_delay.set(1.0 / animation.framerate() as f64);
-                self.totalframe.set(animation.totalframe());
+                let totalframe = animation.totalframe();
+                self.totalframe.set(totalframe);
                 self.animation.replace(Some(animation));
+
+                let cache_size = if self.use_cache.get() { totalframe } else { 1 };
+
+                self.cache.replace(vec![None; cache_size]);
 
                 self.update_size();
 
@@ -169,9 +191,12 @@ mod imp {
             }
         }
     }
-    impl MediaStreamImpl for LottieAnimation {
+    impl MediaStreamImpl for Animation {
         fn play(&self, media_stream: &Self::Type) -> bool {
+            let lp = media_stream.is_loop();
+            media_stream.set_loop(true);
             media_stream.invalidate_contents();
+            media_stream.set_loop(lp);
             true
         }
 
@@ -180,7 +205,7 @@ mod imp {
         }
     }
 
-    impl gdk::subclass::paintable::PaintableImpl for LottieAnimation {
+    impl gdk::subclass::paintable::PaintableImpl for Animation {
         fn flags(&self, _: &Self::Type) -> gdk::PaintableFlags {
             gdk::PaintableFlags::SIZE
         }
@@ -195,51 +220,73 @@ mod imp {
 
         fn snapshot(&self, obj: &Self::Type, snapshot: &gdk::Snapshot, width: f64, height: f64) {
             let total_frame = self.totalframe.get();
-            let frame_num = (self.frame_num.get() + total_frame - 1) % total_frame;
+            let shift = if self.reversed.get() {
+                1
+            } else {
+                total_frame - 1
+            };
+
+            let frame_num = (self.frame_num.get() + shift) % total_frame;
 
             let cache_index = if self.use_cache.get() { frame_num } else { 0 };
 
             let cache = self.cache.borrow_mut();
 
-            if let Some(texture) = &cache.get(cache_index) {
+            if let Some(texture) = &cache[cache_index] {
                 texture.snapshot(snapshot, width, height);
                 self.last_cache_use.set(Some(std::time::Instant::now()));
             }
 
-            if obj.is_playing() && (frame_num != (total_frame - 2) || obj.is_loop()) {
-                glib::timeout_add_once(
-                    std::time::Duration::from_secs_f64(self.frame_delay.get()),
-                    clone!(@weak obj =>  move || {
-                        obj.imp().setup_next_frame();
-                        obj.invalidate_contents();
+            let last = if self.reversed.get() {
+                total_frame - 1
+            } else {
+                total_frame - 1
+                // 1
+            };
 
-                    }),
-                );
-
-                if self.use_cache.get() && frame_num == 0 {
-                    glib::timeout_add_local_once(
-                        std::time::Duration::from_secs(2),
+            if obj.is_playing() {
+                if frame_num != last || obj.is_loop() {
+                    glib::timeout_add_once(
+                        std::time::Duration::from_secs_f64(self.frame_delay.get()),
                         clone!(@weak obj =>  move || {
-                                let imp = obj.imp();
-                                if let Some(instatnt) = imp.last_cache_use.get() {
-                                    if instatnt.elapsed() > std::time::Duration::from_secs_f32(0.5) {
-                                    dbg!(imp.cache.borrow_mut().truncate(1));
-                                    obj.imp().frame_num.set(0);
-                                }
-                            }
+                            obj.imp().setup_next_frame();
+                            obj.invalidate_contents();
                         }),
                     );
+
+                    if self.use_cache.get() && frame_num == 0 {
+                        glib::timeout_add_local_once(
+                            std::time::Duration::from_secs(2),
+                            clone!(@weak obj =>  move || {
+                                    let imp = obj.imp();
+                                    if let Some(instatnt) = imp.last_cache_use.get() {
+                                        if instatnt.elapsed() > std::time::Duration::from_secs_f32(0.5) {
+                                        imp.cache.replace(vec![None; imp.totalframe.get()]);
+                                    }
+                                }
+                            }),
+                        );
+                    }
+                } else {
+                    let first = if self.reversed.get() {
+                        total_frame - 1
+                    } else {
+                        1
+                    };
+                    obj.pause();
+                    self.frame_num.set(first);
+                    obj.invalidate_contents();
                 }
             }
         }
     }
 
-    impl LottieAnimation {
+    impl Animation {
         fn setup_next_frame(&self) {
             let mut cache = self.cache.borrow_mut();
             let frame_num = self.frame_num.get();
 
-            if cache.len() != self.totalframe.get() {
+            if cache[frame_num].is_none() {
                 if let Some(ref mut animation) = *self.animation.borrow_mut() {
                     let (width, height) = self.size.get();
 
@@ -261,14 +308,22 @@ mod imp {
                         width as usize * 4,
                     );
 
-                    if self.use_cache.get() || frame_num == 0 {
-                        cache.push(texture);
+                    if self.use_cache.get() {
+                        cache[frame_num] = Some(texture);
                     } else {
-                        cache[0] = texture;
+                        cache[0] = Some(texture);
                     }
                 }
             }
-            self.frame_num.set((frame_num + 1) % self.totalframe.get());
+
+            let total_frame = self.totalframe.get();
+            let shift = if self.reversed.get() {
+                total_frame - 1
+            } else {
+                1
+            };
+
+            self.frame_num.set((frame_num + shift) % total_frame);
         }
 
         fn update_size(&self) {
@@ -303,12 +358,12 @@ glib::wrapper! {
     ///
     /// picture.set_paintable(Some(&lottie_animation));
     /// ```
-    pub struct LottieAnimation(ObjectSubclass<imp::LottieAnimation>)
+    pub struct Animation(ObjectSubclass<imp::Animation>)
         @extends gtk::MediaFile, gtk::MediaStream,
         @implements gdk::Paintable;
 }
 
-impl LottieAnimation {
+impl Animation {
     /// Creates animation from json of tgs files.
     pub fn from_file(file: gio::File) -> Self {
         glib::Object::new(&[("file", &file)]).expect("Failed to create LottieAnimation")
@@ -327,8 +382,8 @@ impl LottieAnimation {
     ///
     /// and you can disable it when animation
     /// plays once and don't need a cache
-    pub fn set_use_cache(&self, val: bool) {
-        self.set_property("use-cache", val);
+    pub fn set_use_cache(&self, value: bool) {
+        self.set_property("use-cache", value);
     }
 
     /// Returns current width and height of the animation.
@@ -342,7 +397,27 @@ impl LottieAnimation {
     pub fn set_size(&self, width: i32, height: i32) {
         self.set_properties(&[("width", &width.to_value()), ("height", &height.to_value())])
     }
+
+    /// Reversed frame order.
+    pub fn is_reversed(&self) -> bool {
+        self.property("reversed")
+    }
+
+    /// Sets reversed or default frame order.
+    pub fn set_reversed(&self, value: bool) {
+        self.set_property("reversed", value);
+    }
+
+    /// Returns current progress.
+    pub fn progress(&self) -> f64 {
+        self.property("progress")
+    }
+
+    /// Sets current progress.
+    pub fn set_progress(&self, value: f64) {
+        self.set_property("progress", value);
+    }
 }
 
-unsafe impl Sync for LottieAnimation {}
-unsafe impl Send for LottieAnimation {}
+unsafe impl Sync for Animation {}
+unsafe impl Send for Animation {}
