@@ -8,11 +8,8 @@ mod imp {
     use flate2::read::GzDecoder;
     use glib::once_cell::sync::Lazy;
     use rlottie;
+    use std::cell::{Cell, RefCell};
     use std::io::Read;
-    use std::{
-        cell::{Cell, RefCell},
-        collections::VecDeque,
-    };
 
     #[derive(Default)]
     pub struct Animation {
@@ -22,7 +19,6 @@ mod imp {
         totalframe: Cell<usize>,
         cache: RefCell<Vec<Option<gdk::MemoryTexture>>>,
         last_cache_use: Cell<Option<std::time::Instant>>,
-        first_play: Cell<bool>,
 
         pub(super) size: Cell<(i32, i32)>,
 
@@ -137,6 +133,8 @@ mod imp {
                     let progress: f64 = value.get().unwrap();
                     let frame_num = ((self.totalframe.get() - 1) as f64 * progress) as usize;
                     self.frame_num.set(frame_num);
+
+                    self.setup_next_frame();
                     obj.invalidate_contents();
                 }
                 _ => unimplemented!(),
@@ -146,57 +144,59 @@ mod imp {
 
     impl MediaFileImpl for Animation {
         fn open(&self, media_file: &Self::Type) {
-            if let Some(file) = media_file.file() {
-                let path = file.path().expect("file not found");
-                let cache_key = path.file_name().unwrap().to_str().unwrap().to_owned();
+            glib::idle_add_once(clone!(@weak media_file => move|| {
+                    if let Some(file) = media_file.file() {
+                        let path = file.path().expect("file not found");
+                    let cache_key = path.file_name().unwrap().to_str().unwrap().to_owned();
 
-                let animation = {
-                    match rlottie::Animation::from_file(path) {
-                        Some(animation) => animation,
-                        _ => {
-                            let data = file.load_contents(gio::Cancellable::NONE).unwrap().0;
+                    let animation = {
+                        match rlottie::Animation::from_file(path) {
+                            Some(animation) => animation,
+                            _ => {
+                                let data = file.load_contents(gio::Cancellable::NONE).unwrap().0;
 
-                            let mut gz = GzDecoder::new(&*data);
-                            let mut buf = String::new();
+                                let mut gz = GzDecoder::new(&*data);
+                                let mut buf = String::new();
 
-                            if gz.read_to_string(&mut buf).is_ok() {
-                                rlottie::Animation::from_data(buf, cache_key, "")
-                                    .expect("LottieAnimation: unsupporded file type")
-                            } else {
-                                unimplemented!("LottieAnimation: unsupporded file type")
+                                if gz.read_to_string(&mut buf).is_ok() {
+                                    rlottie::Animation::from_data(buf, cache_key, "")
+                                        .expect("LottieAnimation: unsupporded file type")
+                                } else {
+                                    unimplemented!("LottieAnimation: unsupporded file type")
+                                }
                             }
                         }
+                    };
+
+                    let was_playing = media_file.is_playing();
+                    media_file.pause();
+
+                    let imp = media_file.imp();
+
+                    imp.frame_delay.set(1.0 / animation.framerate() as f64);
+                    let totalframe = animation.totalframe();
+                    imp.totalframe.set(totalframe);
+                    imp.animation.replace(Some(animation));
+
+                    let cache_size = if imp.use_cache.get() { totalframe } else { 1 };
+
+                    imp.cache.replace(vec![None; cache_size]);
+
+                    imp.update_size();
+
+                    if was_playing {
+                        media_file.play();
                     }
-                };
 
-                let was_playing = media_file.is_playing();
-                media_file.pause();
-
-                self.frame_num.set(0);
-
-                self.frame_delay.set(1.0 / animation.framerate() as f64);
-                let totalframe = animation.totalframe();
-                self.totalframe.set(totalframe);
-                self.animation.replace(Some(animation));
-
-                let cache_size = if self.use_cache.get() { totalframe } else { 1 };
-
-                self.cache.replace(vec![None; cache_size]);
-
-                self.update_size();
-
-                if was_playing {
-                    media_file.play();
+                    imp.frame_num.set(0);
+                    imp.setup_next_frame();
                 }
-            }
+            }));
         }
     }
     impl MediaStreamImpl for Animation {
         fn play(&self, media_stream: &Self::Type) -> bool {
-            let lp = media_stream.is_loop();
-            media_stream.set_loop(true);
             media_stream.invalidate_contents();
-            media_stream.set_loop(lp);
             true
         }
 
@@ -220,6 +220,11 @@ mod imp {
 
         fn snapshot(&self, obj: &Self::Type, snapshot: &gdk::Snapshot, width: f64, height: f64) {
             let total_frame = self.totalframe.get();
+
+            if total_frame == 0 {
+                return;
+            }
+
             let shift = if self.reversed.get() {
                 1
             } else {
@@ -273,9 +278,13 @@ mod imp {
                     } else {
                         1
                     };
-                    obj.pause();
-                    self.frame_num.set(first);
-                    obj.invalidate_contents();
+                    std::thread::spawn(clone!(@weak obj =>  move || {
+                        let imp = obj.imp();
+                        obj.pause();
+                        imp.frame_num.set(first);
+                        imp.setup_next_frame();
+                        obj.invalidate_contents();
+                    }));
                 }
             }
         }
