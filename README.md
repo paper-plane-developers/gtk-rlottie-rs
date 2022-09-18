@@ -1,6 +1,6 @@
 # gtk-rlottie-rs
 
-gtk::MediaFile that renders lottie animations and telegram stickers using rlottie
+gtk Widget that renders lottie animations and telegram stickers using rlottie
 
 to use this library you need [rlottie](https://github.com/melix99/rlottie)
 
