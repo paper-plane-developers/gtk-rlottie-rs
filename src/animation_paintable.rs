@@ -164,20 +164,32 @@ mod imp {
             };
 
             if frame_num != last || obj.is_loop() {
-                glib::timeout_add_once(
-                    std::time::Duration::from_secs_f64(self.frame_delay.get()),
-                    clone!(@weak obj =>  move || {
+                std::thread::spawn(clone!(@weak obj =>  move || {
 
-                        let imp = obj.imp();
+                    let imp = obj.imp();
 
-                        if imp.cache_is_out_of_date.get() {
-                             imp.cache.replace(vec![None; imp.totalframe.get()]);
-                        }
+                    if imp.cache_is_out_of_date.take() {
+                         imp.cache.replace(vec![None; imp.totalframe.get()]);
+                    }
 
-                        obj.imp().setup_next_frame();
-                        obj.invalidate_contents();
-                    }),
-                );
+                    obj.imp().setup_next_frame();
+                    obj.invalidate_contents();
+                }));
+
+                // glib::timeout_add_once(
+                //     std::time::Duration::from_secs_f64(self.frame_delay.get()),
+                //     clone!(@weak obj =>  move || {
+
+                //         let imp = obj.imp();
+
+                //         if imp.cache_is_out_of_date.take() {
+                //              imp.cache.replace(vec![None; imp.totalframe.get()]);
+                //         }
+
+                //         obj.imp().setup_next_frame();
+                //         obj.invalidate_contents();
+                //     }),
+                // );
 
                 if self.use_cache.get() && frame_num == 0 {
                     glib::timeout_add_local_once(
@@ -399,4 +411,4 @@ impl AnimationPaintable {
 }
 
 unsafe impl Sync for AnimationPaintable {}
-unsafe impl Send for AnimationPaintable {}
+// unsafe impl Send for AnimationPaintable {}
