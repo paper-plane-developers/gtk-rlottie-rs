@@ -8,12 +8,13 @@ use super::AnimationPaintable;
 mod imp {
     use super::*;
     use glib::once_cell::sync::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     #[derive(Default)]
     pub struct Animation {
         pub(super) animation: RefCell<Option<AnimationPaintable>>,
         pub(super) property_queue: RefCell<Vec<(String, glib::Value)>>,
+        pub(super) default_size: Cell<(f64, f64)>,
     }
 
     #[glib::object_subclass]
@@ -167,7 +168,14 @@ mod imp {
             orientation: gtk::Orientation,
             for_size: i32,
         ) -> (i32, i32, i32, i32) {
-            if let Some(ref animation) = &*self.animation.borrow() {
+            if for_size < 0 {
+                let default = self.default_size.get();
+                match orientation {
+                    gtk::Orientation::Horizontal => (0, default.0 as i32, -1, -1),
+                    gtk::Orientation::Vertical => (0, default.1 as i32, -1, -1),
+                    _ => unimplemented!(),
+                }
+            } else if let Some(ref animation) = &*self.animation.borrow() {
                 let aspect_ratio = animation.intrinsic_aspect_ratio();
                 match orientation {
                     gtk::Orientation::Vertical => {
@@ -200,6 +208,8 @@ impl Animation {
         animation.connect_invalidate_contents(clone!(@weak self as obj => move |_| {
             obj.queue_draw();
         }));
+
+        self.imp().default_size.set(animation.size());
 
         for property in ["playing", "loop", "reversed", "progress"] {
             self.bind_property(property, &animation, property).build();

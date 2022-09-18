@@ -20,7 +20,7 @@ mod imp {
         last_cache_use: Cell<Option<std::time::Instant>>,
         cache_is_out_of_date: Cell<bool>,
         aspect_ratio: Cell<f64>,
-        size: Cell<(f64, f64)>,
+        pub(super) size: Cell<(f64, f64)>,
 
         scale_factor: Cell<f64>,
 
@@ -356,6 +356,10 @@ impl AnimationPaintable {
     pub fn from_filename(path: &str) -> Self {
         let file = gio::File::for_path(path);
         Self::from_file(file)
+    }
+
+    pub fn size(&self) -> (f64, f64) {
+        self.imp().size.get()
     }
 
     pub fn set_scale_factor(&self, scale_factor: f64) {
