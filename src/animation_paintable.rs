@@ -19,8 +19,8 @@ mod imp {
         cache: RefCell<Vec<Option<gdk::MemoryTexture>>>,
         last_cache_use: Cell<Option<std::time::Instant>>,
         cache_is_out_of_date: Cell<bool>,
-        aspect_ratio: Cell<f64>,
-        pub(super) size: Cell<(f64, f64)>,
+        default_size: Cell<(i32, i32)>,
+        size: Cell<(f64, f64)>,
 
         scale_factor: Cell<f64>,
 
@@ -127,8 +127,12 @@ mod imp {
     }
 
     impl gdk::subclass::paintable::PaintableImpl for AnimationPaintable {
-        fn intrinsic_aspect_ratio(&self, _paintable: &Self::Type) -> f64 {
-            self.aspect_ratio.get()
+        fn intrinsic_width(&self, _paintable: &Self::Type) -> i32 {
+            self.default_size.get().1
+        }
+
+        fn intrinsic_height(&self, _paintable: &Self::Type) -> i32 {
+            self.default_size.get().1
         }
 
         fn snapshot(&self, obj: &Self::Type, snapshot: &gdk::Snapshot, width: f64, height: f64) {
@@ -264,8 +268,8 @@ mod imp {
             self.animation.replace(Some(animation));
 
             self.size.set((size.width as f64, size.height as f64));
-            self.aspect_ratio
-                .set(size.width as f64 / size.height as f64);
+            self.default_size
+                .set((size.width as i32, size.height as i32));
 
             let cache_size = if self.use_cache.get() { totalframe } else { 1 };
 
@@ -356,10 +360,6 @@ impl AnimationPaintable {
     pub fn from_filename(path: &str) -> Self {
         let file = gio::File::for_path(path);
         Self::from_file(file)
-    }
-
-    pub fn size(&self) -> (f64, f64) {
-        self.imp().size.get()
     }
 
     pub fn set_scale_factor(&self, scale_factor: f64) {
