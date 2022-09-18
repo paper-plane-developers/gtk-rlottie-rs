@@ -19,7 +19,7 @@ mod imp {
         cache: RefCell<Vec<Option<gdk::MemoryTexture>>>,
         last_cache_use: Cell<Option<std::time::Instant>>,
         cache_is_out_of_date: Cell<bool>,
-
+        aspect_ratio: Cell<f64>,
         size: Cell<(f64, f64)>,
 
         scale_factor: Cell<f64>,
@@ -128,8 +128,7 @@ mod imp {
 
     impl gdk::subclass::paintable::PaintableImpl for AnimationPaintable {
         fn intrinsic_aspect_ratio(&self, _paintable: &Self::Type) -> f64 {
-            let (width, height) = self.size.get();
-            width / height
+            self.aspect_ratio.get()
         }
 
         fn snapshot(&self, obj: &Self::Type, snapshot: &gdk::Snapshot, width: f64, height: f64) {
@@ -198,7 +197,7 @@ mod imp {
                 std::thread::spawn(clone!(@weak obj =>  move || {
                     let imp = obj.imp();
                     obj.pause();
-                    if imp.cache_is_out_of_date.get() {
+                    if imp.cache_is_out_of_date.take() {
                         imp.cache.replace(vec![None; imp.totalframe.get()]);
                     }
                     imp.frame_num.set(first);
@@ -265,6 +264,8 @@ mod imp {
             self.animation.replace(Some(animation));
 
             self.size.set((size.width as f64, size.height as f64));
+            self.aspect_ratio
+                .set(size.width as f64 / size.height as f64);
 
             let cache_size = if self.use_cache.get() { totalframe } else { 1 };
 
