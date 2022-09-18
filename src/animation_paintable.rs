@@ -33,7 +33,7 @@ mod imp {
     impl ObjectSubclass for AnimationPaintable {
         const NAME: &'static str = "LottieAnimationPaintable";
         type Type = super::AnimationPaintable;
-        type ParentType = gtk::MediaFile;
+        type ParentType = gtk::MediaStream;
         type Interfaces = (gdk::Paintable,);
     }
 
@@ -115,54 +115,6 @@ mod imp {
         }
     }
 
-    impl MediaFileImpl for AnimationPaintable {
-        fn open(&self, media_file: &Self::Type) {
-            if let Some(file) = media_file.file() {
-                let path = file.path().expect("file not found");
-                let cache_key = path.file_name().unwrap().to_str().unwrap().to_owned();
-
-                let animation = {
-                    match rlottie::Animation::from_file(path) {
-                        Some(animation) => animation,
-                        _ => {
-                            let data = file.load_contents(gio::Cancellable::NONE).unwrap().0;
-
-                            let mut gz = GzDecoder::new(&*data);
-                            let mut buf = String::new();
-
-                            if gz.read_to_string(&mut buf).is_ok() {
-                                rlottie::Animation::from_data(buf, cache_key, "")
-                                    .expect("LottieAnimationPaintable: unsupporded file type")
-                            } else {
-                                unimplemented!("LottieAnimationPaintable: unsupporded file type")
-                            }
-                        }
-                    }
-                };
-
-                let was_playing = media_file.is_playing();
-                media_file.pause();
-
-                self.frame_num.set(0);
-
-                self.frame_delay.set(1.0 / animation.framerate() as f64);
-                let totalframe = animation.totalframe();
-                let size = animation.size();
-                self.totalframe.set(totalframe);
-                self.animation.replace(Some(animation));
-
-                self.size.set((size.width as f64, size.height as f64));
-
-                let cache_size = if self.use_cache.get() { totalframe } else { 1 };
-
-                self.cache.replace(vec![None; cache_size]);
-
-                if was_playing {
-                    media_file.play();
-                }
-            }
-        }
-    }
     impl MediaStreamImpl for AnimationPaintable {
         fn play(&self, media_stream: &Self::Type) -> bool {
             media_stream.invalidate_contents();
@@ -281,6 +233,44 @@ mod imp {
             self.cache_is_out_of_date.set(true);
         }
 
+        pub(super) fn open(&self, file: gio::File) {
+            let path = file.path().expect("file not found");
+            let cache_key = path.file_name().unwrap().to_str().unwrap().to_owned();
+
+            let animation = {
+                match rlottie::Animation::from_file(path) {
+                    Some(animation) => animation,
+                    _ => {
+                        let data = file.load_contents(gio::Cancellable::NONE).unwrap().0;
+
+                        let mut gz = GzDecoder::new(&*data);
+                        let mut buf = String::new();
+
+                        if gz.read_to_string(&mut buf).is_ok() {
+                            rlottie::Animation::from_data(buf, cache_key, "")
+                                .expect("LottieAnimationPaintable: unsupporded file type")
+                        } else {
+                            unimplemented!("LottieAnimationPaintable: unsupporded file type")
+                        }
+                    }
+                }
+            };
+
+            self.frame_num.set(0);
+
+            self.frame_delay.set(1.0 / animation.framerate() as f64);
+            let totalframe = animation.totalframe();
+            let size = animation.size();
+            self.totalframe.set(totalframe);
+            self.animation.replace(Some(animation));
+
+            self.size.set((size.width as f64, size.height as f64));
+
+            let cache_size = if self.use_cache.get() { totalframe } else { 1 };
+
+            self.cache.replace(vec![None; cache_size]);
+        }
+
         fn setup_next_frame(&self) {
             let mut cache = self.cache.borrow_mut();
             let frame_num = self.frame_num.get();
@@ -337,7 +327,7 @@ mod imp {
 }
 
 glib::wrapper! {
-    /// Implementation of [gtk::MediaFile](https://docs.gtk.org/gtk4/class.MediaFile.html) for lottie.
+    /// Implementation of [gtk::MediaMediaStream](https://docs.gtk.org/gtk4/class.MediaStream.html) for lottie.
     ///
     /// Example of usage
     /// ```
@@ -349,14 +339,16 @@ glib::wrapper! {
     /// picture.set_paintable(Some(&lottie_animation));
     /// ```
     pub struct AnimationPaintable(ObjectSubclass<imp::AnimationPaintable>)
-        @extends gtk::MediaFile, gtk::MediaStream,
+        @extends gtk::MediaStream,
         @implements gdk::Paintable;
 }
 
 impl AnimationPaintable {
     /// Creates animation from json of tgs files.
     pub fn from_file(file: gio::File) -> Self {
-        glib::Object::new(&[("file", &file)]).expect("Failed to create LottieAnimationPaintable")
+        let obj: Self = glib::Object::new(&[]).expect("Failed to create LottieAnimationPaintable");
+        obj.imp().open(file);
+        obj
     }
 
     /// Creates animation from json of tgs files from the given filename.
