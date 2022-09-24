@@ -3,16 +3,22 @@ use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{gdk, gio, glib};
 
+struct AnimationWrapper(rlottie::Animation);
+
+unsafe impl Send for AnimationWrapper {}
+unsafe impl Sync for AnimationWrapper {}
+
 mod imp {
     use super::*;
     use flate2::read::GzDecoder;
     use glib::once_cell::sync::Lazy;
     use std::cell::{Cell, RefCell};
     use std::io::Read;
+    use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
     pub struct AnimationPaintable {
-        animation: RefCell<Option<rlottie::Animation>>,
+        animation: Arc<Mutex<Option<AnimationWrapper>>>,
         frame_num: Cell<usize>,
         frame_delay: Cell<f64>,
         totalframe: Cell<usize>,
@@ -107,8 +113,8 @@ mod imp {
                     let frame_num = ((self.totalframe.get() - 1) as f64 * progress) as usize;
                     self.frame_num.set(frame_num);
 
-                    self.setup_next_frame();
-                    obj.invalidate_contents();
+                    self.setup_next_frame_in_separate_thread(obj);
+                    // obj.invalidate_contents();
                 }
                 _ => unimplemented!(),
             }
@@ -157,39 +163,28 @@ mod imp {
             }
 
             let last = if self.reversed.get() {
-                total_frame - 1
-            } else {
-                // total_frame - 1
                 1
+            } else {
+                total_frame - 1
             };
 
-            if frame_num != last || obj.is_loop() {
-                std::thread::spawn(clone!(@weak obj =>  move || {
+            if frame_num == last && !obj.is_loop() {
+                let first = if self.reversed.get() {
+                    total_frame - 1
+                } else {
+                    1
+                };
+                self.frame_num.set(first);
+                obj.pause();
+            }
 
-                    let imp = obj.imp();
-
-                    if imp.cache_is_out_of_date.take() {
-                         imp.cache.replace(vec![None; imp.totalframe.get()]);
-                    }
-
-                    obj.imp().setup_next_frame();
-                    obj.invalidate_contents();
-                }));
-
-                // glib::timeout_add_once(
-                //     std::time::Duration::from_secs_f64(self.frame_delay.get()),
-                //     clone!(@weak obj =>  move || {
-
-                //         let imp = obj.imp();
-
-                //         if imp.cache_is_out_of_date.take() {
-                //              imp.cache.replace(vec![None; imp.totalframe.get()]);
-                //         }
-
-                //         obj.imp().setup_next_frame();
-                //         obj.invalidate_contents();
-                //     }),
-                // );
+            if obj.is_playing() && (frame_num != last || obj.is_loop()) {
+                glib::timeout_add_once(
+                    std::time::Duration::from_secs_f64(self.frame_delay.get()),
+                    clone!(@weak obj =>  move || {
+                        obj.imp().setup_next_frame_in_separate_thread(&obj);
+                    }),
+                );
 
                 if self.use_cache.get() && frame_num == 0 {
                     glib::timeout_add_local_once(
@@ -205,21 +200,7 @@ mod imp {
                     );
                 }
             } else {
-                let first = if self.reversed.get() {
-                    total_frame - 1
-                } else {
-                    1
-                };
-                std::thread::spawn(clone!(@weak obj =>  move || {
-                    let imp = obj.imp();
-                    obj.pause();
-                    if imp.cache_is_out_of_date.take() {
-                        imp.cache.replace(vec![None; imp.totalframe.get()]);
-                    }
-                    imp.frame_num.set(first);
-                    imp.setup_next_frame();
-                    obj.invalidate_contents();
-                }));
+                self.setup_next_frame_in_separate_thread(obj);
             }
         }
     }
@@ -277,7 +258,8 @@ mod imp {
             let totalframe = animation.totalframe();
             let size = animation.size();
             self.totalframe.set(totalframe);
-            self.animation.replace(Some(animation));
+
+            *self.animation.lock().unwrap() = Some(AnimationWrapper(animation));
 
             self.size.set((size.width as f64, size.height as f64));
             self.default_size
@@ -288,57 +270,89 @@ mod imp {
             self.cache.replace(vec![None; cache_size]);
         }
 
-        fn setup_next_frame(&self) {
-            let mut cache = self.cache.borrow_mut();
-            let frame_num = self.frame_num.get();
+        pub(super) fn setup_next_frame_in_separate_thread(&self, obj: &super::AnimationPaintable) {
+            if let Ok(cache) = self.cache.try_borrow() {
+                let frame_num = self.frame_num.get();
 
-            if cache[frame_num].is_none() {
-                if let Some(ref mut animation) = *self.animation.borrow_mut() {
-                    let (width, height) = self.size.get();
+                fn next_frame(obj: &super::AnimationPaintable, frame_num: usize) {
+                    let imp = obj.imp();
 
-                    let scale_factor = self.scale_factor.get();
-
-                    let (width, height) = {
-                        (
-                            (width * scale_factor) as i32,
-                            (height * scale_factor) as i32,
-                        )
+                    let total_frame = imp.totalframe.get();
+                    let shift = if imp.reversed.get() {
+                        total_frame - 1
+                    } else {
+                        1
                     };
 
-                    let mut surface =
-                        rlottie::Surface::new(rlottie::Size::new(width as usize, height as usize));
-                    animation.render(frame_num, &mut surface);
+                    imp.frame_num.set((frame_num + shift) % total_frame);
+                    obj.invalidate_contents();
+                }
 
-                    let data = surface.data();
-                    let data = unsafe {
-                        std::slice::from_raw_parts_mut(data.as_ptr() as *mut u8, data.len() * 4)
-                    };
-                    let data = glib::Bytes::from_owned(data.to_owned());
-
-                    let texture = gdk::MemoryTexture::new(
-                        width,
-                        height,
-                        gdk::MemoryFormat::B8g8r8a8,
-                        &data,
-                        width as usize * 4,
+                if cache[frame_num].is_none() || self.cache_is_out_of_date.get() {
+                    let (sender, receiver) = glib::MainContext::sync_channel::<gdk::MemoryTexture>(
+                        Default::default(),
+                        0,
                     );
 
-                    if self.use_cache.get() {
-                        cache[frame_num] = Some(texture);
-                    } else {
-                        cache[0] = Some(texture);
-                    }
+                    receiver.attach(
+                        None,
+                        clone!(@weak obj => @default-return glib::Continue(false), move |texture| {
+                            let imp = obj.imp();
+
+                            if imp.cache_is_out_of_date.take() {
+                                imp.cache.replace(vec![None; imp.totalframe.get()]);
+                            }
+
+                            let index = if imp.use_cache.get() { frame_num } else { 0 };
+
+                            imp.cache.borrow_mut()[index] = Some(texture);
+
+                            next_frame(&obj, frame_num);
+
+                            glib::Continue(false)
+                        }),
+                    );
+
+                    let (width, height) = self.size.get();
+                    let scale_factor = self.scale_factor.get();
+                    let animation = self.animation.clone();
+
+                    std::thread::spawn(move || {
+                        let width = (width * scale_factor) as i32;
+                        let height = (height * scale_factor) as i32;
+
+                        if let Some(ref mut animation) = *animation.lock().unwrap() {
+                            let mut surface = rlottie::Surface::new(rlottie::Size::new(
+                                width as usize,
+                                height as usize,
+                            ));
+
+                            animation.0.render(frame_num, &mut surface);
+
+                            let data = surface.data();
+                            let data = unsafe {
+                                std::slice::from_raw_parts_mut(
+                                    data.as_ptr() as *mut u8,
+                                    data.len() * 4,
+                                )
+                            };
+                            let data = glib::Bytes::from_owned(data.to_owned());
+
+                            let texture = gdk::MemoryTexture::new(
+                                width,
+                                height,
+                                gdk::MemoryFormat::B8g8r8a8,
+                                &data,
+                                width as usize * 4,
+                            );
+
+                            sender.send(texture).unwrap();
+                        }
+                    });
+                } else {
+                    next_frame(obj, frame_num);
                 }
             }
-
-            let total_frame = self.totalframe.get();
-            let shift = if self.reversed.get() {
-                total_frame - 1
-            } else {
-                1
-            };
-
-            self.frame_num.set((frame_num + shift) % total_frame);
         }
     }
 }
@@ -411,4 +425,4 @@ impl AnimationPaintable {
 }
 
 unsafe impl Sync for AnimationPaintable {}
-// unsafe impl Send for AnimationPaintable {}
+unsafe impl Send for AnimationPaintable {}
