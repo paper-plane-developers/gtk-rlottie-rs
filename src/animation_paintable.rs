@@ -179,7 +179,7 @@ mod imp {
             }
 
             if obj.is_playing() && (frame_num != last || obj.is_loop()) {
-                glib::timeout_add_once(
+                glib::timeout_add_local_once(
                     std::time::Duration::from_secs_f64(self.frame_delay.get()),
                     clone!(@weak obj =>  move || {
                         obj.imp().setup_next_frame_in_separate_thread(&obj);
@@ -423,6 +423,3 @@ impl AnimationPaintable {
         self.set_property("progress", value);
     }
 }
-
-unsafe impl Sync for AnimationPaintable {}
-unsafe impl Send for AnimationPaintable {}
