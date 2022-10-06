@@ -8,31 +8,32 @@ struct AnimationWrapper(rlottie::Animation);
 unsafe impl Send for AnimationWrapper {}
 unsafe impl Sync for AnimationWrapper {}
 
+use flate2::read::GzDecoder;
+use std::io::Read;
+
 mod imp {
     use super::*;
-    use flate2::read::GzDecoder;
     use glib::once_cell::sync::Lazy;
     use std::cell::{Cell, RefCell};
-    use std::io::Read;
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
     pub struct AnimationPaintable {
-        animation: Arc<Mutex<Option<AnimationWrapper>>>,
-        frame_num: Cell<usize>,
-        frame_delay: Cell<f64>,
-        totalframe: Cell<usize>,
-        cache: RefCell<Vec<Option<gdk::MemoryTexture>>>,
-        last_cache_use: Cell<Option<std::time::Instant>>,
-        cache_is_out_of_date: Cell<bool>,
-        default_size: Cell<(i32, i32)>,
-        size: Cell<(f64, f64)>,
+        pub(super) animation: Arc<Mutex<Option<AnimationWrapper>>>,
+        pub(super) frame_num: Cell<usize>,
+        pub(super) frame_delay: Cell<f64>,
+        pub(super) totalframe: Cell<usize>,
+        pub(super) cache: RefCell<Vec<Option<gdk::MemoryTexture>>>,
+        pub(super) last_cache_use: Cell<Option<std::time::Instant>>,
+        pub(super) cache_is_out_of_date: Cell<bool>,
+        pub(super) default_size: Cell<(i32, i32)>,
+        pub(super) size: Cell<(f64, f64)>,
 
-        scale_factor: Cell<f64>,
+        pub(super) scale_factor: Cell<f64>,
 
         // fields for properties
-        use_cache: Cell<bool>,
-        reversed: Cell<bool>,
+        pub(super) use_cache: Cell<bool>,
+        pub(super) reversed: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -229,47 +230,6 @@ mod imp {
             self.cache_is_out_of_date.set(true);
         }
 
-        pub(super) fn open(&self, file: gio::File) {
-            let path = file.path().expect("file not found");
-            let cache_key = path.file_name().unwrap().to_str().unwrap().to_owned();
-
-            let animation = {
-                match rlottie::Animation::from_file(path) {
-                    Some(animation) => animation,
-                    _ => {
-                        let data = file.load_contents(gio::Cancellable::NONE).unwrap().0;
-
-                        let mut gz = GzDecoder::new(&*data);
-                        let mut buf = String::new();
-
-                        if gz.read_to_string(&mut buf).is_ok() {
-                            rlottie::Animation::from_data(buf, cache_key, "")
-                                .expect("LottieAnimationPaintable: unsupporded file type")
-                        } else {
-                            unimplemented!("LottieAnimationPaintable: unsupporded file type")
-                        }
-                    }
-                }
-            };
-
-            self.frame_num.set(0);
-
-            self.frame_delay.set(1.0 / animation.framerate() as f64);
-            let totalframe = animation.totalframe();
-            let size = animation.size();
-            self.totalframe.set(totalframe);
-
-            *self.animation.lock().unwrap() = Some(AnimationWrapper(animation));
-
-            self.size.set((size.width as f64, size.height as f64));
-            self.default_size
-                .set((size.width as i32, size.height as i32));
-
-            let cache_size = if self.use_cache.get() { totalframe } else { 1 };
-
-            self.cache.replace(vec![None; cache_size]);
-        }
-
         pub(super) fn setup_next_frame_in_separate_thread(&self, obj: &super::AnimationPaintable) {
             if let Ok(cache) = self.cache.try_borrow() {
                 let frame_num = self.frame_num.get();
@@ -375,10 +335,69 @@ glib::wrapper! {
 }
 
 impl AnimationPaintable {
+    pub(super) fn open(&self, file: gio::File) {
+        let (sender, receiver) =
+            glib::MainContext::sync_channel::<AnimationWrapper>(Default::default(), 0);
+
+        receiver.attach(
+            None,
+            clone!(@weak self as obj => @default-return glib::Continue(false), move |animation_wrapper| {
+                let animation = animation_wrapper.0;
+
+
+                let imp = obj.imp();
+
+                imp.frame_num.set(0);
+
+                imp.frame_delay.set(1.0 / animation.framerate() as f64);
+                let totalframe = animation.totalframe();
+                let size = animation.size();
+                imp.totalframe.set(totalframe);
+
+                *imp.animation.lock().unwrap() = Some(AnimationWrapper(animation));
+
+                imp.size.set((size.width as f64, size.height as f64));
+                imp.default_size
+                    .set((size.width as i32, size.height as i32));
+
+                let cache_size = if imp.use_cache.get() { totalframe } else { 1 };
+
+                imp.cache.replace(vec![None; cache_size]);
+                glib::Continue(false)
+            }),
+        );
+
+        std::thread::spawn(move || {
+            let path = file.path().expect("file not found");
+            let cache_key = path.file_name().unwrap().to_str().unwrap().to_owned();
+
+            let animation = {
+                match rlottie::Animation::from_file(path) {
+                    Some(animation) => animation,
+                    _ => {
+                        let data = file.load_contents(gio::Cancellable::NONE).unwrap().0;
+
+                        let mut gz = GzDecoder::new(&*data);
+                        let mut buf = String::new();
+
+                        if gz.read_to_string(&mut buf).is_ok() {
+                            rlottie::Animation::from_data(buf, cache_key, "")
+                                .expect("LottieAnimationPaintable: unsupporded file type")
+                        } else {
+                            unimplemented!("LottieAnimationPaintable: unsupporded file type")
+                        }
+                    }
+                }
+            };
+
+            sender.send(AnimationWrapper(animation)).unwrap();
+        });
+    }
+
     /// Creates animation from json of tgs files.
     pub fn from_file(file: gio::File) -> Self {
         let obj: Self = glib::Object::new(&[]).expect("Failed to create LottieAnimationPaintable");
-        obj.imp().open(file);
+        obj.open(file);
         obj
     }
 
