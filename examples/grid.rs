@@ -1,5 +1,7 @@
 /**
  * Example with a lot of animations that I want to optimize
+ *
+ * You can check grid_view example for better performance
  */
 use gtk::prelude::*;
 use gtk_rlottie as rlt; // I suggest to rename this package in dependencies
