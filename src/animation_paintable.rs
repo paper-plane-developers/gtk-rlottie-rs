@@ -11,15 +11,83 @@ unsafe impl Sync for AnimationWrapper {}
 use flate2::read::GzDecoder;
 use std::io::Read;
 
+use std::sync::mpsc::*;
+use std::sync::*;
+use std::sync::{Arc, Mutex};
+
+struct FrameData {
+    width: f64,
+    height: f64,
+    scale_factor: f64,
+    animation: Arc<Mutex<Option<AnimationWrapper>>>,
+    frame_num: usize,
+    sender: glib::SyncSender<(gdk::MemoryTexture, usize)>,
+}
+
+fn global_texture_render_sender() -> Sender<FrameData> {
+    static mut RESULT_SENDER: Option<Mutex<Sender<FrameData>>> = None;
+    unsafe {
+        if RESULT_SENDER.is_none() {
+            let (tx, rx) = channel();
+
+            std::thread::spawn(move || {
+                while let Ok(FrameData {
+                    width,
+                    height,
+                    scale_factor,
+                    animation,
+                    frame_num,
+                    sender,
+                }) = rx.recv()
+                {
+                    let width = (width * scale_factor) as i32;
+                    let height = (height * scale_factor) as i32;
+
+                    if let Some(ref mut animation) = *animation.lock().unwrap() {
+                        let mut surface = rlottie::Surface::new(rlottie::Size::new(
+                            width as usize,
+                            height as usize,
+                        ));
+
+                        animation.0.render(frame_num, &mut surface);
+
+                        let data = surface.data();
+                        let data = unsafe {
+                            std::slice::from_raw_parts_mut(data.as_ptr() as *mut u8, data.len() * 4)
+                        };
+                        let data = glib::Bytes::from_owned(data.to_owned());
+
+                        let texture = gdk::MemoryTexture::new(
+                            width,
+                            height,
+                            gdk::MemoryFormat::B8g8r8a8,
+                            &data,
+                            width as usize * 4,
+                        );
+
+                        sender.send((texture, frame_num)).unwrap();
+                    }
+                    // println!("catch!");
+                }
+            });
+
+            RESULT_SENDER = Some(Mutex::new(tx));
+        }
+        RESULT_SENDER.as_ref().unwrap().lock().unwrap().clone()
+    }
+}
+
 mod imp {
     use super::*;
     use glib::once_cell::sync::Lazy;
+    use glib::once_cell::unsync::OnceCell;
     use std::cell::{Cell, RefCell};
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
     pub struct AnimationPaintable {
         pub(super) animation: Arc<Mutex<Option<AnimationWrapper>>>,
+        pub(super) texture_sender: OnceCell<glib::SyncSender<(gdk::MemoryTexture, usize)>>,
         pub(super) frame_num: Cell<usize>,
         pub(super) frame_delay: Cell<f64>,
         pub(super) totalframe: Cell<usize>,
@@ -249,66 +317,23 @@ mod imp {
                 }
 
                 if cache[frame_num].is_none() || self.cache_is_out_of_date.get() {
-                    let (sender, receiver) = glib::MainContext::sync_channel::<gdk::MemoryTexture>(
-                        Default::default(),
-                        0,
-                    );
-
-                    receiver.attach(
-                        None,
-                        clone!(@weak obj => @default-return glib::Continue(false), move |texture| {
-                            let imp = obj.imp();
-
-                            if imp.cache_is_out_of_date.take() {
-                                imp.cache.replace(vec![None; imp.totalframe.get()]);
-                            }
-
-                            let index = if imp.use_cache.get() { frame_num } else { 0 };
-
-                            imp.cache.borrow_mut()[index] = Some(texture);
-
-                            next_frame(&obj, frame_num);
-
-                            glib::Continue(false)
-                        }),
-                    );
-
                     let (width, height) = self.size.get();
                     let scale_factor = self.scale_factor.get();
+                    let frame_num = self.frame_num.get();
+
                     let animation = self.animation.clone();
+                    let sender = self.texture_sender.get().unwrap().clone();
 
-                    std::thread::spawn(move || {
-                        let width = (width * scale_factor) as i32;
-                        let height = (height * scale_factor) as i32;
+                    let frame_data = FrameData {
+                        width,
+                        height,
+                        scale_factor,
+                        frame_num,
+                        animation,
+                        sender,
+                    };
 
-                        if let Some(ref mut animation) = *animation.lock().unwrap() {
-                            let mut surface = rlottie::Surface::new(rlottie::Size::new(
-                                width as usize,
-                                height as usize,
-                            ));
-
-                            animation.0.render(frame_num, &mut surface);
-
-                            let data = surface.data();
-                            let data = unsafe {
-                                std::slice::from_raw_parts_mut(
-                                    data.as_ptr() as *mut u8,
-                                    data.len() * 4,
-                                )
-                            };
-                            let data = glib::Bytes::from_owned(data.to_owned());
-
-                            let texture = gdk::MemoryTexture::new(
-                                width,
-                                height,
-                                gdk::MemoryFormat::B8g8r8a8,
-                                &data,
-                                width as usize * 4,
-                            );
-
-                            sender.send(texture).unwrap();
-                        }
-                    });
+                    global_texture_render_sender().send(frame_data);
                 } else {
                     next_frame(obj, frame_num);
                 }
@@ -335,7 +360,48 @@ glib::wrapper! {
 }
 
 impl AnimationPaintable {
+    fn next_frame(&self, frame_num: usize) {
+        let imp = self.imp();
+
+        let total_frame = imp.totalframe.get();
+        let shift = if imp.reversed.get() {
+            total_frame - 1
+        } else {
+            1
+        };
+
+        imp.frame_num.set((frame_num + shift) % total_frame);
+        self.invalidate_contents();
+    }
+
     pub(super) fn open(&self, file: gio::File) {
+        // Texture render
+        let (sender, receiver) =
+            glib::MainContext::sync_channel::<(gdk::MemoryTexture, usize)>(Default::default(), 0);
+
+        self.imp().texture_sender.set(sender).unwrap();
+        receiver.attach(
+            None,
+            clone!(@weak self as obj => @default-return glib::Continue(false), move |data| {
+                let (texture, frame_num) = data;
+
+                let imp = obj.imp();
+
+                if imp.cache_is_out_of_date.take() {
+                    imp.cache.replace(vec![None; imp.totalframe.get()]);
+                }
+
+                let index = if imp.use_cache.get() { frame_num } else { 0 };
+
+                imp.cache.borrow_mut()[index] = Some(texture);
+
+                obj.next_frame(frame_num);
+
+                glib::Continue(true)
+            }),
+        );
+
+        // File loading
         let (sender, receiver) =
             glib::MainContext::sync_channel::<AnimationWrapper>(Default::default(), 0);
 
