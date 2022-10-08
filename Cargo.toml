@@ -7,8 +7,5 @@ edition = "2021"
 
 [dependencies]
 gtk =  { version = ">=0.4", package = "gtk4" }
-# rlottie = "0.5.0"
-rlottie = { git = "https://github.com/melix99/telegram-rlottie-rs" }
+rlottie = { git="https://github.com/msrd0/rlottie-rs" } 
 flate2 = "1.0.24"
-
-

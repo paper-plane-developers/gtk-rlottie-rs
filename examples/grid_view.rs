@@ -28,9 +28,7 @@ fn build_ui(app: &gtk::Application) {
         animation
     }
 
-    // let grid = gtk::Grid::new();
-
-    let vector: Vec<model::AnimationState> = (0..=10000)
+    let vector: Vec<model::AnimationState> = (0..=10000000)
         .into_iter()
         .map(|_| model::AnimationState::new())
         .collect();
@@ -64,13 +62,6 @@ fn build_ui(app: &gtk::Application) {
         .child(&scrolled_window)
         .build();
 
-    // for top in 0..20 {
-    //     for left in 0..10 {
-    //         {
-    //             grid.attach(&create_animation(), left as _, top as _, 1, 1)
-    //         }
-    //     }
-    // }
     window.present();
 }
 

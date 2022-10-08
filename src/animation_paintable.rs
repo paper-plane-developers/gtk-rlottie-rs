@@ -11,9 +11,7 @@ unsafe impl Sync for AnimationWrapper {}
 use flate2::read::GzDecoder;
 use std::io::Read;
 
-use std::sync::mpsc::*;
-use std::sync::*;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 
 struct FrameData {
     width: f64,
@@ -24,56 +22,66 @@ struct FrameData {
     sender: glib::SyncSender<(gdk::MemoryTexture, usize)>,
 }
 
-fn global_texture_render_sender() -> Sender<FrameData> {
-    static mut RESULT_SENDER: Option<Mutex<Sender<FrameData>>> = None;
+fn global_texture_render_sender() -> mpsc::Sender<FrameData> {
+    const THREAD_COUNT: usize = 8;
+
+    static mut RESULT_SENDER: [Option<Mutex<mpsc::Sender<FrameData>>>; THREAD_COUNT] =
+        [None, None, None, None, None, None, None, None];
+
+    static mut LAST_NUM: usize = 0;
+
     unsafe {
-        if RESULT_SENDER.is_none() {
-            let (tx, rx) = channel();
+        if RESULT_SENDER[0].is_none() {
+            for mpsc_sender in &mut RESULT_SENDER {
+                let (sender, receiver) = mpsc::channel();
 
-            std::thread::spawn(move || {
-                while let Ok(FrameData {
-                    width,
-                    height,
-                    scale_factor,
-                    animation,
-                    frame_num,
-                    sender,
-                }) = rx.recv()
-                {
-                    let width = (width * scale_factor) as i32;
-                    let height = (height * scale_factor) as i32;
+                std::thread::spawn(move || {
+                    while let Ok(FrameData {
+                        width,
+                        height,
+                        scale_factor,
+                        animation,
+                        frame_num,
+                        sender,
+                    }) = receiver.recv()
+                    {
+                        let width = (width * scale_factor) as i32;
+                        let height = (height * scale_factor) as i32;
 
-                    if let Some(ref mut animation) = *animation.lock().unwrap() {
-                        let mut surface = rlottie::Surface::new(rlottie::Size::new(
-                            width as usize,
-                            height as usize,
-                        ));
+                        if let Some(ref mut animation) = *animation.lock().unwrap() {
+                            let mut surface = rlottie::Surface::new(rlottie::Size::new(
+                                width as usize,
+                                height as usize,
+                            ));
 
-                        animation.0.render(frame_num, &mut surface);
+                            animation.0.render(frame_num, &mut surface);
 
-                        let data = surface.data();
-                        let data = unsafe {
-                            std::slice::from_raw_parts_mut(data.as_ptr() as *mut u8, data.len() * 4)
-                        };
-                        let data = glib::Bytes::from_owned(data.to_owned());
+                            let data = glib::Bytes::from_owned(surface);
 
-                        let texture = gdk::MemoryTexture::new(
-                            width,
-                            height,
-                            gdk::MemoryFormat::B8g8r8a8,
-                            &data,
-                            width as usize * 4,
-                        );
+                            let texture = gdk::MemoryTexture::new(
+                                width,
+                                height,
+                                gdk::MemoryFormat::B8g8r8a8,
+                                &data,
+                                width as usize * 4,
+                            );
 
-                        sender.send((texture, frame_num)).unwrap();
+                            sender.send((texture, frame_num)).unwrap();
+                        }
                     }
-                    // println!("catch!");
-                }
-            });
+                });
 
-            RESULT_SENDER = Some(Mutex::new(tx));
+                *mpsc_sender = Some(Mutex::new(sender));
+            }
         }
-        RESULT_SENDER.as_ref().unwrap().lock().unwrap().clone()
+        LAST_NUM = (LAST_NUM + 1) % THREAD_COUNT;
+
+        RESULT_SENDER[LAST_NUM]
+            .as_ref()
+            .unwrap_unchecked()
+            .lock()
+            .unwrap()
+            .clone()
     }
 }
 
@@ -94,6 +102,7 @@ mod imp {
         pub(super) cache: RefCell<Vec<Option<gdk::MemoryTexture>>>,
         pub(super) last_cache_use: Cell<Option<std::time::Instant>>,
         pub(super) cache_is_out_of_date: Cell<bool>,
+        pub(super) waiting_for_render: Cell<bool>,
         pub(super) default_size: Cell<(i32, i32)>,
         pub(super) size: Cell<(f64, f64)>,
 
@@ -183,7 +192,6 @@ mod imp {
                     self.frame_num.set(frame_num);
 
                     self.setup_next_frame_in_separate_thread(obj);
-                    // obj.invalidate_contents();
                 }
                 _ => unimplemented!(),
             }
@@ -299,6 +307,10 @@ mod imp {
         }
 
         pub(super) fn setup_next_frame_in_separate_thread(&self, obj: &super::AnimationPaintable) {
+            if self.waiting_for_render.get() {
+                return;
+            }
+
             if let Ok(cache) = self.cache.try_borrow() {
                 let frame_num = self.frame_num.get();
 
@@ -333,7 +345,8 @@ mod imp {
                         sender,
                     };
 
-                    global_texture_render_sender().send(frame_data);
+                    self.waiting_for_render.set(true);
+                    global_texture_render_sender().send(frame_data).unwrap();
                 } else {
                     next_frame(obj, frame_num);
                 }
@@ -386,6 +399,8 @@ impl AnimationPaintable {
                 let (texture, frame_num) = data;
 
                 let imp = obj.imp();
+
+                imp.waiting_for_render.set(false);
 
                 if imp.cache_is_out_of_date.take() {
                     imp.cache.replace(vec![None; imp.totalframe.get()]);
