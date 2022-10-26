@@ -1,6 +1,8 @@
 /**
  * Example with a lot of animations using GridView
  *
+ * Use with gtk 4.8 for better performance
+ *
  * I need to fix cache clearing
  * also some of animations not playing
  */
@@ -22,15 +24,12 @@ fn build_ui(app: &gtk::Application) {
         let animation = rlt::Animation::from_filename(hand_animation_path);
         animation.set_halign(gtk::Align::Center);
         animation.set_loop(true);
-        animation.set_height_request(50);
-        animation.set_width_request(50);
+        animation.set_use_cache(false);
         animation.play();
         animation
     }
 
-    // let grid = gtk::Grid::new();
-
-    let vector: Vec<model::AnimationState> = (0..=10000)
+    let vector: Vec<model::AnimationState> = (0..100_000)
         .into_iter()
         .map(|_| model::AnimationState::new())
         .collect();
@@ -43,8 +42,11 @@ fn build_ui(app: &gtk::Application) {
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(|_factory, list_item| {
         let animation = create_animation();
+        let animation = fixed_size::FixedSizeBin::new(animation);
         list_item.set_child(Some(&animation));
     });
+
+    factory.connect_bind(|_, _| {});
 
     let selection_model = gtk::NoSelection::new(Some(&model));
 
@@ -52,7 +54,7 @@ fn build_ui(app: &gtk::Application) {
 
     grid_view.set_hscroll_policy(gtk::ScrollablePolicy::Natural);
     grid_view.set_vscroll_policy(gtk::ScrollablePolicy::Natural);
-
+    grid_view.set_max_columns(32);
     grid_view.set_can_target(false);
 
     let scrolled_window = gtk::ScrolledWindow::builder().child(&grid_view).build();
@@ -64,24 +66,18 @@ fn build_ui(app: &gtk::Application) {
         .child(&scrolled_window)
         .build();
 
-    // for top in 0..20 {
-    //     for left in 0..10 {
-    //         {
-    //             grid.attach(&create_animation(), left as _, top as _, 1, 1)
-    //         }
-    //     }
-    // }
     window.present();
 }
 
-mod model {
+use gtk::subclass::prelude::*;
 
+mod model {
+    use super::*;
     use glib::Object;
     use gtk::glib;
 
     mod imp {
         use super::*;
-        use gtk::subclass::prelude::*;
 
         #[derive(Default)]
         pub struct AnimationState;
@@ -102,6 +98,66 @@ mod model {
     impl AnimationState {
         pub fn new() -> Self {
             Object::new(&[]).expect("Failed to create `AnimationState`.")
+        }
+    }
+}
+
+mod fixed_size {
+    use super::*;
+    use glib::Object;
+    use gtk::glib;
+
+    mod imp {
+        use gtk::glib::once_cell::sync::OnceCell;
+
+        use super::*;
+
+        #[derive(Default)]
+        pub struct FixedSizeBin(pub(super) OnceCell<rlt::Animation>);
+
+        #[glib::object_subclass]
+        impl ObjectSubclass for FixedSizeBin {
+            const NAME: &'static str = "MyGtkAppFixedSizeBin";
+            type ParentType = gtk::Widget;
+            type Type = super::FixedSizeBin;
+        }
+
+        impl ObjectImpl for FixedSizeBin {}
+        impl WidgetImpl for FixedSizeBin {
+            fn size_allocate(&self, _: &Self::Type, width: i32, height: i32, baseline: i32) {
+                self.0
+                    .get()
+                    .unwrap()
+                    .allocate(width, height, baseline, None);
+            }
+
+            fn request_mode(&self, _: &Self::Type) -> gtk::SizeRequestMode {
+                gtk::SizeRequestMode::ConstantSize
+            }
+
+            fn measure(&self, _: &Self::Type, _: gtk::Orientation, _: i32) -> (i32, i32, i32, i32) {
+                (0, 30, -1, -1)
+            }
+        }
+
+        impl Drop for FixedSizeBin {
+            fn drop(&mut self) {
+                self.0.get().unwrap().unparent();
+            }
+        }
+    }
+
+    glib::wrapper! {
+        pub struct FixedSizeBin(ObjectSubclass<imp::FixedSizeBin>)
+            @extends gtk::Widget;
+    }
+
+    impl FixedSizeBin {
+        pub fn new(animation: rlt::Animation) -> Self {
+            let obj: Self = Object::new(&[]).expect("Failed to create `AnimationState`.");
+            animation.set_parent(&obj);
+            obj.imp().0.set(animation).unwrap();
+            obj
         }
     }
 }
