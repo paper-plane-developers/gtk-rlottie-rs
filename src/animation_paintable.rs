@@ -53,29 +53,12 @@ mod imp {
         fn properties() -> &'static [glib::ParamSpec] {
             static PROPERTIES: Lazy<Vec<glib::ParamSpec>> = Lazy::new(|| {
                 vec![
-                    glib::ParamSpecBoolean::new(
-                        "use-cache",
-                        "Use cache",
-                        "Do not use cache for animations that plays rarely",
-                        true,
-                        glib::ParamFlags::READWRITE,
-                    ),
-                    glib::ParamSpecBoolean::new(
-                        "reversed",
-                        "Reversed",
-                        "Reversed frame order",
-                        false,
-                        glib::ParamFlags::READWRITE,
-                    ),
-                    glib::ParamSpecDouble::new(
-                        "progress",
-                        "Progress",
-                        "Set progress of the animation",
-                        0.0,
-                        1.0,
-                        0.0,
-                        glib::ParamFlags::READWRITE,
-                    ),
+                    glib::ParamSpecBoolean::builder("reversed").build(),
+                    glib::ParamSpecBoolean::builder("use-cache").build(),
+                    glib::ParamSpecDouble::builder("progress")
+                        .minimum(0.0)
+                        .maximum(1.0)
+                        .build(),
                 ]
             });
             PROPERTIES.as_ref()

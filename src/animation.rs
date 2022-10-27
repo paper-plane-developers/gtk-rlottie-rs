@@ -37,43 +37,16 @@ mod imp {
         fn properties() -> &'static [glib::ParamSpec] {
             static PROPERTIES: Lazy<Vec<glib::ParamSpec>> = Lazy::new(|| {
                 vec![
-                    glib::ParamSpecBoolean::new(
-                        "playing",
-                        "Playing",
-                        "Animation is playing",
-                        false,
-                        glib::ParamFlags::READWRITE,
-                    ),
-                    glib::ParamSpecBoolean::new(
-                        "loop",
-                        "Loop",
-                        "Loop animation",
-                        false,
-                        glib::ParamFlags::READWRITE,
-                    ),
-                    glib::ParamSpecBoolean::new(
-                        "use-cache",
-                        "Use cache",
-                        "Do not use cache for animations that plays rarely",
-                        true,
-                        glib::ParamFlags::WRITABLE,
-                    ),
-                    glib::ParamSpecBoolean::new(
-                        "reversed",
-                        "Reversed",
-                        "Reversed frame order",
-                        false,
-                        glib::ParamFlags::READWRITE,
-                    ),
-                    glib::ParamSpecDouble::new(
-                        "progress",
-                        "Progress",
-                        "Set progress of the animation",
-                        0.0,
-                        1.0,
-                        0.0,
-                        glib::ParamFlags::READWRITE,
-                    ),
+                    glib::ParamSpecBoolean::builder("playing").build(),
+                    glib::ParamSpecBoolean::builder("loop").build(),
+                    glib::ParamSpecBoolean::builder("reversed").build(),
+                    glib::ParamSpecBoolean::builder("use-cache")
+                        .flags(glib::ParamFlags::WRITABLE)
+                        .build(),
+                    glib::ParamSpecDouble::builder("progress")
+                        .minimum(0.0)
+                        .maximum(1.0)
+                        .build(),
                 ]
             });
             PROPERTIES.as_ref()
@@ -228,7 +201,6 @@ impl Animation {
     /// Creates animation from json of tgs files.
     pub fn from_file(file: gio::File) -> Self {
         let obj: Self = glib::Object::new(&[]).expect("Failed to create LottieAnimation");
-        // glib::Object::new(&[("file", &file)]).expect("Failed to create LottieAnimation");
         let animation = AnimationPaintable::from_file(file);
         obj.set_animation(animation);
         obj
