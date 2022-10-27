@@ -3,24 +3,28 @@ use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{gdk, gio, glib};
 
-struct AnimationWrapper(rlottie::Animation);
-
-unsafe impl Send for AnimationWrapper {}
-
 use flate2::read::GzDecoder;
 use std::io::Read;
+use std::time::Duration;
+
+struct RenderInfo {
+    frame_num: usize,
+    width: i32,
+    height: i32,
+    sender: glib::Sender<(usize, gdk::MemoryTexture)>,
+}
 
 mod imp {
     use super::*;
     use glib::once_cell::sync::Lazy;
     use std::cell::{Cell, RefCell};
-    use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
     pub struct AnimationPaintable {
-        pub(super) animation: Arc<Mutex<Option<AnimationWrapper>>>,
+        pub(super) render_sender: RefCell<Option<std::sync::mpsc::Sender<RenderInfo>>>,
+
         pub(super) frame_num: Cell<usize>,
-        pub(super) frame_delay: Cell<f64>,
+        pub(super) frame_delay: Cell<Duration>,
         pub(super) totalframe: Cell<usize>,
         pub(super) cache: RefCell<Vec<Option<gdk::MemoryTexture>>>,
         pub(super) last_cache_use: Cell<Option<std::time::Instant>>,
@@ -162,7 +166,7 @@ mod imp {
 
             if obj.is_playing() && (frame_num != last || obj.is_loop()) {
                 glib::timeout_add_local_once(
-                    std::time::Duration::from_secs_f64(self.frame_delay.get()),
+                    self.frame_delay.get(),
                     clone!(@weak obj =>  move || {
                         obj.imp().setup_next_frame(&obj);
                     }),
@@ -216,14 +220,14 @@ mod imp {
                 }
 
                 if cache[frame_num].is_none() || self.cache_is_out_of_date.get() {
-                    let (sender, receiver) = glib::MainContext::sync_channel::<gdk::MemoryTexture>(
-                        Default::default(),
-                        0,
-                    );
+                    let (sender, receiver) = glib::MainContext::channel::<(
+                        usize,
+                        gdk::MemoryTexture,
+                    )>(Default::default());
 
                     receiver.attach(
                         None,
-                        clone!(@weak obj => @default-return glib::Continue(false), move |texture| {
+                        clone!(@weak obj => @default-return glib::Continue(false), move |(frame_num, texture)| {
                             let imp = obj.imp();
 
                             if imp.cache_is_out_of_date.take() {
@@ -240,39 +244,21 @@ mod imp {
                         }),
                     );
 
-                    let render_closure = {
+                    if let Some(ref render_sender) = *self.render_sender.borrow() {
                         let (width, height) = self.size.get();
                         let scale_factor = self.scale_factor.get();
-                        let animation = self.animation.clone();
+                        let width = (width * scale_factor) as i32;
+                        let height = (height * scale_factor) as i32;
 
-                        move || {
-                            let width = (width * scale_factor) as i32;
-                            let height = (height * scale_factor) as i32;
+                        let render_info = RenderInfo {
+                            frame_num,
+                            width,
+                            height,
+                            sender,
+                        };
 
-                            if let Some(ref mut animation) = *animation.lock().unwrap() {
-                                let mut surface = rlottie::Surface::new(rlottie::Size::new(
-                                    width as usize,
-                                    height as usize,
-                                ));
-
-                                animation.0.render(frame_num, &mut surface);
-
-                                let data = glib::Bytes::from_owned(surface);
-
-                                let texture = gdk::MemoryTexture::new(
-                                    width,
-                                    height,
-                                    gdk::MemoryFormat::B8g8r8a8,
-                                    &data,
-                                    width as usize * 4,
-                                );
-
-                                sender.send(texture).unwrap();
-                            }
-                        }
-                    };
-
-                    std::thread::spawn(render_closure);
+                        render_sender.send(render_info).unwrap();
+                    }
                 } else {
                     next_frame(obj, frame_num);
                 }
@@ -300,38 +286,42 @@ glib::wrapper! {
 
 impl AnimationPaintable {
     pub(super) fn open(&self, file: gio::File) {
+        struct AnimationInfo {
+            totalframe: usize,
+            default_size: (i32, i32),
+            frame_delay: Duration,
+            duration: Duration,
+        }
+
         let (sender, receiver) =
-            glib::MainContext::sync_channel::<AnimationWrapper>(Default::default(), 0);
+            glib::MainContext::sync_channel::<AnimationInfo>(Default::default(), 0);
 
         receiver.attach(
             None,
-            clone!(@weak self as obj => @default-return glib::Continue(false), move |animation_wrapper| {
-                let animation = animation_wrapper.0;
+            clone!(@weak self as obj => @default-return glib::Continue(false), move |animation_info| {
+                let AnimationInfo { frame_delay, totalframe, default_size, duration } = animation_info;
 
                 let imp = obj.imp();
 
                 imp.frame_num.set(0);
-                imp.frame_delay.set(1.0 / animation.framerate() as f64);
-                let totalframe = animation.totalframe();
-                let size = animation.size();
+                imp.frame_delay.set(frame_delay);
                 imp.totalframe.set(totalframe);
-                let duration = std::time::Duration::from_secs_f64(animation.duration());
 
-                *imp.animation.lock().unwrap() = Some(AnimationWrapper(animation));
-
-                imp.size.set((size.width as f64, size.height as f64));
+                let (width, height) = default_size;
+                imp.size.set((width as f64, height as f64));
                 imp.default_size
-                    .set((size.width as i32, size.height as i32));
+                    .set(default_size);
 
-                let cache_size = if imp.use_cache.get() { totalframe } else { 1 };
-                imp.cache.replace(vec![None; cache_size]);
+                    let cache_size = if imp.use_cache.get() { totalframe } else { 1 };
+                    imp.cache.replace(vec![None; cache_size]);
 
-                let cache_cleaner = {
+                    let cache_cleaner = {
                     clone!(@weak obj => @default-return glib::Continue(false),  move || {
                             let imp = obj.imp();
                             if let Some(instant) = imp.last_cache_use.get() {
                                 let elapsed = instant.elapsed();
                                 if elapsed > duration * 2 && elapsed < duration * 4 {
+                                    println!("Cache cleaned");
                                     imp.cache.replace(vec![None; imp.totalframe.get()]);
                                 }
                             }
@@ -348,11 +338,16 @@ impl AnimationPaintable {
             }),
         );
 
+        let (render_sender, render_receiver) = std::sync::mpsc::channel::<RenderInfo>();
+
+        self.imp().render_sender.replace(Some(render_sender));
+
         std::thread::spawn(move || {
             let path = file.path().expect("file not found");
+
             let cache_key = path.file_name().unwrap().to_str().unwrap().to_owned();
 
-            let animation = {
+            let mut animation = {
                 match rlottie::Animation::from_file(path) {
                     Some(animation) => animation,
                     _ => {
@@ -371,7 +366,42 @@ impl AnimationPaintable {
                 }
             };
 
-            sender.send(AnimationWrapper(animation)).unwrap();
+            let size = animation.size();
+
+            let animation_info = AnimationInfo {
+                frame_delay: Duration::from_secs_f64(1.0 / animation.framerate() as f64),
+                totalframe: animation.totalframe(),
+                default_size: (size.width as i32, size.height as i32),
+                duration: Duration::from_secs_f64(animation.duration()),
+            };
+
+            sender.send(animation_info).unwrap();
+
+            while let Ok(render_info) = render_receiver.recv() {
+                let RenderInfo {
+                    frame_num,
+                    width,
+                    height,
+                    sender,
+                } = render_info;
+
+                let size = rlottie::Size::new(width as usize, height as usize);
+                let mut surface = rlottie::Surface::new(size);
+
+                animation.render(frame_num, &mut surface);
+
+                let data = glib::Bytes::from_owned(surface);
+
+                let texture = gdk::MemoryTexture::new(
+                    width,
+                    height,
+                    gdk::MemoryFormat::B8g8r8a8,
+                    &data,
+                    width as usize * 4,
+                );
+
+                sender.send((frame_num, texture)).unwrap();
+            }
         });
     }
 
