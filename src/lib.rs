@@ -144,6 +144,10 @@ mod imp {
 
             let cache = self.cache.borrow_mut();
 
+            if cache.len() == 0 {
+                return;
+            }
+
             if let Some(texture) = &cache[index] {
                 texture.snapshot(snapshot, width, height);
                 self.last_cache_use.set(Some(std::time::Instant::now()));
@@ -238,7 +242,7 @@ impl Animation {
     fn tick(&self, clock: &gdk::FrameClock) -> Continue {
         let imp = self.imp();
 
-        if imp.use_cache.get() {
+        if imp.use_cache.get() && !imp.cache_dropped.get() {
             if let Some(instant) = imp.last_cache_use.get() {
                 let elapsed = instant.elapsed();
                 if elapsed.as_secs() > 1 {
