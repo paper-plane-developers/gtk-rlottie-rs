@@ -97,7 +97,7 @@ mod model {
 
     impl AnimationState {
         pub fn new() -> Self {
-            Object::new(&[]).expect("Failed to create `AnimationState`.")
+            Object::new(&[])
         }
     }
 }
@@ -124,18 +124,18 @@ mod fixed_size {
 
         impl ObjectImpl for FixedSizeBin {}
         impl WidgetImpl for FixedSizeBin {
-            fn size_allocate(&self, _: &Self::Type, width: i32, height: i32, baseline: i32) {
+            fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
                 self.0
                     .get()
                     .unwrap()
                     .allocate(width, height, baseline, None);
             }
 
-            fn request_mode(&self, _: &Self::Type) -> gtk::SizeRequestMode {
+            fn request_mode(&self) -> gtk::SizeRequestMode {
                 gtk::SizeRequestMode::ConstantSize
             }
 
-            fn measure(&self, _: &Self::Type, _: gtk::Orientation, _: i32) -> (i32, i32, i32, i32) {
+            fn measure(&self, _: gtk::Orientation, _: i32) -> (i32, i32, i32, i32) {
                 (0, 30, -1, -1)
             }
         }
@@ -154,7 +154,7 @@ mod fixed_size {
 
     impl FixedSizeBin {
         pub fn new(animation: rlt::Animation) -> Self {
-            let obj: Self = Object::new(&[]).expect("Failed to create `AnimationState`.");
+            let obj: Self = Object::new(&[]);
             animation.set_parent(&obj);
             obj.imp().0.set(animation).unwrap();
             obj

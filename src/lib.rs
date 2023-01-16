@@ -47,10 +47,10 @@ mod imp {
     }
 
     impl ObjectImpl for Animation {
-        fn constructed(&self, obj: &Self::Type) {
-            self.parent_constructed(obj);
+        fn constructed(&self) {
+            self.parent_constructed();
 
-            obj.connect_scale_factor_notify(|obj| {
+            self.obj().connect_scale_factor_notify(|obj| {
                 obj.imp().cache_is_out_of_date.set(true);
             });
         }
@@ -71,7 +71,7 @@ mod imp {
             PROPERTIES.as_ref()
         }
 
-        fn property(&self, _obj: &Self::Type, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
+        fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
             match pspec.name() {
                 "loop" => self.loop_.get().to_value(),
                 "playing" => self.playing.get().to_value(),
@@ -84,25 +84,19 @@ mod imp {
             }
         }
 
-        fn set_property(
-            &self,
-            obj: &Self::Type,
-            _id: usize,
-            value: &glib::Value,
-            pspec: &glib::ParamSpec,
-        ) {
+        fn set_property(&self, _id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
             match pspec.name() {
                 "loop" => self.loop_.set(value.get().unwrap()),
                 "playing" => {
                     self.playing.set(value.get().unwrap());
-                    obj.queue_draw();
+                    self.obj().queue_draw();
                 }
                 "progress" => {
                     let progress: f64 = value.get().unwrap();
                     let frame_num = ((self.totalframe.get() - 1) as f64 * progress) as usize;
                     self.frame_num.set(frame_num);
 
-                    obj.setup_next_frame();
+                    self.obj().setup_next_frame();
                 }
                 "reversed" => self.reversed.set(value.get().unwrap()),
                 "use-cache" => {
@@ -117,7 +111,9 @@ mod imp {
     }
 
     impl WidgetImpl for Animation {
-        fn snapshot(&self, widget: &Self::Type, snapshot: &gtk::Snapshot) {
+        fn snapshot(&self, snapshot: &gtk::Snapshot) {
+            let widget = self.obj();
+
             let width = widget.width();
             let height = widget.height();
 
@@ -150,7 +146,7 @@ mod imp {
             let cache = self.cache.borrow_mut();
 
             if let Some(texture) = &cache[cache_index] {
-                texture.snapshot(snapshot.upcast_ref(), width, height);
+                texture.snapshot(snapshot, width, height);
                 self.last_cache_use.set(Some(std::time::Instant::now()));
             }
 
@@ -182,16 +178,11 @@ mod imp {
             }
         }
 
-        fn request_mode(&self, _widget: &Self::Type) -> gtk::SizeRequestMode {
+        fn request_mode(&self) -> gtk::SizeRequestMode {
             gtk::SizeRequestMode::HeightForWidth
         }
 
-        fn measure(
-            &self,
-            _widget: &Self::Type,
-            orientation: gtk::Orientation,
-            for_size: i32,
-        ) -> (i32, i32, i32, i32) {
+        fn measure(&self, orientation: gtk::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
             let aspect_ratio = {
                 let (width, height) = self.default_size.get();
                 width as f64 / height as f64
@@ -435,7 +426,7 @@ impl Animation {
 
     /// Creates animation from json of tgs files.
     pub fn from_file(file: &impl IsA<gio::File>) -> Self {
-        let obj: Self = glib::Object::new(&[]).expect("Failed to create LottieAnimation");
+        let obj: Self = glib::Object::new(&[]);
         obj.open(file.to_owned().upcast());
         obj
     }
