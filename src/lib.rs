@@ -22,6 +22,8 @@ mod imp {
 
     #[derive(Default, Debug)]
     pub struct Animation {
+        pub(super) frame_start: Cell<i64>,
+
         pub(super) render_sender: RefCell<Option<std::sync::mpsc::Sender<RenderInfo>>>,
         pub(super) frame_num: Cell<usize>,
         pub(super) frame_delay: Cell<Duration>,
@@ -29,6 +31,7 @@ mod imp {
         pub(super) cache: RefCell<Vec<Option<gdk::MemoryTexture>>>,
         pub(super) last_cache_use: Cell<Option<std::time::Instant>>,
         pub(super) cache_is_out_of_date: Cell<bool>,
+        pub(super) cache_dropped: Cell<bool>,
         pub(super) default_size: Cell<(i32, i32)>,
         pub(super) size: Cell<(f64, f64)>,
 
@@ -89,20 +92,21 @@ mod imp {
                 "loop" => self.loop_.set(value.get().unwrap()),
                 "playing" => {
                     self.playing.set(value.get().unwrap());
+                    let frame_time = (glib::monotonic_time() * 6) / 100000;
+                    let frame_start = frame_time - self.frame_num.get() as i64;
+                    self.frame_start.set(frame_start);
                     self.obj().queue_draw();
                 }
                 "progress" => {
                     let progress: f64 = value.get().unwrap();
                     let frame_num = ((self.totalframe.get() - 1) as f64 * progress) as usize;
-                    self.frame_num.set(frame_num);
-
-                    self.obj().setup_next_frame();
+                    self.obj().setup_frame(frame_num);
                 }
                 "reversed" => self.reversed.set(value.get().unwrap()),
                 "use-cache" => {
                     let use_cache = value.get().unwrap();
                     if use_cache != self.use_cache.replace(use_cache) {
-                        self.cache.replace(vec![None; self.totalframe.get()]);
+                        self.drop_cache();
                     }
                 }
                 _ => unimplemented!(),
@@ -132,49 +136,17 @@ mod imp {
 
             self.resize(width, height);
 
-            let total_frame = self.totalframe.get();
-            let shift = if self.reversed.get() {
-                1
+            let index = if self.use_cache.get() {
+                self.frame_num.get()
             } else {
-                total_frame - 1
+                0
             };
-
-            let frame_num = (self.frame_num.get() + shift) % total_frame;
-
-            let cache_index = if self.use_cache.get() { frame_num } else { 0 };
 
             let cache = self.cache.borrow_mut();
 
-            if let Some(texture) = &cache[cache_index] {
+            if let Some(texture) = &cache[index] {
                 texture.snapshot(snapshot, width, height);
                 self.last_cache_use.set(Some(std::time::Instant::now()));
-            }
-
-            let last = if self.reversed.get() {
-                1
-            } else {
-                total_frame - 1
-            };
-
-            if frame_num == last && !widget.is_loop() {
-                let first = if self.reversed.get() {
-                    total_frame - 1
-                } else {
-                    1
-                };
-                self.frame_num.set(first);
-                widget.pause();
-            }
-
-            if self.playing.get() && (frame_num != last || self.loop_.get()) {
-                glib::timeout_add_local_once(
-                    self.frame_delay.get(),
-                    clone!(@weak widget =>  move || {
-                        widget.setup_next_frame();
-                    }),
-                );
-            } else {
-                widget.setup_next_frame();
             }
         }
 
@@ -214,15 +186,37 @@ mod imp {
     }
 
     impl Animation {
+        pub fn drop_cache(&self) {
+            if self.cache_dropped.replace(true) {
+                return;
+            }
+
+            let mut cache = self.cache.borrow_mut();
+
+            if cache.len() == 0 {
+                return;
+            }
+
+            let index = self.frame_num.get();
+
+            let current = cache[index].take();
+
+            for frame in &mut *cache {
+                *frame = None;
+            }
+
+            cache[index] = current;
+        }
+
         fn resize(&self, width: f64, height: f64) {
-            let aspect_ratio = width as f64 / height as f64;
+            let aspect_ratio = width / height;
 
             let (width, height) = if aspect_ratio <= 1.0 {
                 // width is smaller
-                (width as f64, ((height as f64) / aspect_ratio))
+                (width, ((height) / aspect_ratio))
             } else {
                 // height is smaller
-                (((width as f64) / aspect_ratio), height as f64)
+                (((width) / aspect_ratio), height)
             };
 
             if self.size.get() != (width, height) {
@@ -241,34 +235,73 @@ glib::wrapper! {
 }
 
 impl Animation {
-    fn setup_next_frame(&self) {
+    fn tick(&self, clock: &gdk::FrameClock) -> Continue {
         let imp = self.imp();
 
-        if let Ok(cache) = imp.cache.try_borrow() {
-            let frame_num = imp.frame_num.get();
+        if imp.use_cache.get() {
+            if let Some(instant) = imp.last_cache_use.get() {
+                let elapsed = instant.elapsed();
+                if elapsed.as_secs() > 1 {
+                    imp.drop_cache();
+                    return Continue(true);
+                }
+            }
+        }
 
-            if cache[frame_num].is_none() || imp.cache_is_out_of_date.get() {
+        if self.is_mapped() && self.is_playing() {
+            let totalframe = self.imp().totalframe.get();
+            let reversed = self.imp().reversed.get();
+
+            let frame =
+                ((clock.frame_time() * 6) / 100000 - imp.frame_start.get()) as usize % totalframe;
+
+            let prev_frame = imp.frame_num.get();
+
+            if frame != prev_frame {
+                if reversed {
+                    self.setup_frame(totalframe - frame - 1);
+                } else {
+                    self.setup_frame(frame);
+                }
+            }
+
+            if frame == totalframe - 1 && !self.is_loop() {
+                self.pause();
+            }
+        }
+
+        Continue(true)
+    }
+
+    fn setup_frame(&self, frame_num: usize) {
+        let imp = self.imp();
+
+        let cache_is_out_of_date = imp.cache_is_out_of_date.get();
+        let use_cache = imp.use_cache.get();
+
+        let ignore_cache = cache_is_out_of_date || !use_cache;
+
+        if let Ok(cache) = imp.cache.try_borrow() {
+            if ignore_cache || cache[frame_num].is_none() {
                 let (sender, receiver) =
                     glib::MainContext::channel::<(usize, gdk::MemoryTexture)>(Default::default());
 
                 receiver.attach(
-                        None,
-                        clone!(@weak self as obj => @default-return glib::Continue(false), move |(frame_num, texture)| {
-                            let imp = obj.imp();
+                    None,
+                    clone!(@to-owned imp => move |(frame_num, texture)| {
+                        if imp.cache_is_out_of_date.take() {
+                            imp.cache.replace(vec![None; imp.totalframe.get()]);
+                        }
 
-                            if imp.cache_is_out_of_date.take() {
-                                imp.cache.replace(vec![None; imp.totalframe.get()]);
-                            }
 
-                            let index = if imp.use_cache.get() { frame_num } else { 0 };
+                        let index = if imp.use_cache.get() { frame_num } else { 0 };
+                        imp.cache.borrow_mut()[index] = Some(texture);
+                        imp.obj().request_draw(index);
+                        imp.cache_dropped.set(false);
 
-                            imp.cache.borrow_mut()[index] = Some(texture);
-
-                            obj.next_frame(frame_num);
-
-                            glib::Continue(false)
-                        }),
-                    );
+                        glib::Continue(false)
+                    }),
+                );
 
                 if let Some(ref render_sender) = *imp.render_sender.borrow() {
                     let (width, height) = imp.size.get();
@@ -286,22 +319,13 @@ impl Animation {
                     render_sender.send(render_info).unwrap();
                 }
             } else {
-                self.next_frame(frame_num);
+                self.request_draw(frame_num);
             }
         }
     }
 
-    fn next_frame(&self, frame_num: usize) {
-        let imp = self.imp();
-
-        let total_frame = imp.totalframe.get();
-        let shift = if imp.reversed.get() {
-            total_frame - 1
-        } else {
-            1
-        };
-
-        imp.frame_num.set((frame_num + shift) % total_frame);
+    pub fn request_draw(&self, frame_num: usize) {
+        self.imp().frame_num.set(frame_num);
         self.queue_draw();
     }
 
@@ -310,7 +334,6 @@ impl Animation {
             totalframe: usize,
             default_size: (i32, i32),
             frame_delay: Duration,
-            duration: Duration,
         }
 
         let (sender, receiver) = glib::MainContext::channel::<AnimationInfo>(Default::default());
@@ -320,8 +343,7 @@ impl Animation {
             clone!(@weak self as obj => @default-return glib::Continue(false), move |animation_info| {
                 let imp = obj.imp();
 
-                let AnimationInfo { totalframe, default_size, frame_delay, duration } = animation_info;
-
+                let AnimationInfo { totalframe, default_size, frame_delay} = animation_info;
 
                 imp.frame_num.set(0);
                 imp.frame_delay.set(frame_delay);
@@ -332,26 +354,11 @@ impl Animation {
                 imp.default_size
                     .set(default_size);
 
-                    let cache_size = if imp.use_cache.get() { totalframe } else { 1 };
-                    imp.cache.replace(vec![None; cache_size]);
+                imp.cache.replace(vec![None; totalframe]);
+                imp.cache_dropped.set(true);
 
-                    let cache_cleaner = {
-                    clone!(@weak obj => @default-return glib::Continue(false),  move || {
-                            let imp = obj.imp();
-                            if let Some(instant) = imp.last_cache_use.get() {
-                                let elapsed = instant.elapsed();
-                                if elapsed > duration * 2 && elapsed < duration * 4 {
-                                    imp.cache.replace(vec![None; imp.totalframe.get()]);
-                                }
-                            }
-                        glib::Continue(true)
-                    })
-                };
-
-                glib::timeout_add_local(
-                    duration,
-                    cache_cleaner,
-                );
+                imp.obj().setup_frame(0);
+                imp.obj().add_tick_callback(Self::tick);
 
                 glib::Continue(false)
             }),
@@ -388,10 +395,9 @@ impl Animation {
             let size = animation.size();
 
             let animation_info = AnimationInfo {
-                frame_delay: Duration::from_secs_f64(1.0 / animation.framerate() as f64),
+                frame_delay: Duration::from_secs_f64(1.0 / animation.framerate()),
                 totalframe: animation.totalframe(),
                 default_size: (size.width as i32, size.height as i32),
-                duration: Duration::from_secs_f64(animation.duration()),
             };
 
             sender.send(animation_info).unwrap();
