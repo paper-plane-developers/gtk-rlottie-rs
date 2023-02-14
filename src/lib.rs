@@ -436,7 +436,7 @@ impl Animation {
 
     /// Creates animation from json of tgs files.
     pub fn from_file(file: &impl IsA<gio::File>) -> Self {
-        let obj: Self = glib::Object::new(&[]);
+        let obj: Self = glib::Object::new();
         obj.open(file.to_owned().upcast());
         obj
     }

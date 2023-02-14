@@ -48,9 +48,9 @@ fn build_ui(app: &gtk::Application) {
 
     factory.connect_bind(|_, _| {});
 
-    let selection_model = gtk::NoSelection::new(Some(&model));
+    let selection_model = gtk::NoSelection::new(Some(model));
 
-    let grid_view = gtk::GridView::new(Some(&selection_model), Some(&factory));
+    let grid_view = gtk::GridView::new(Some(selection_model), Some(factory));
 
     grid_view.set_hscroll_policy(gtk::ScrollablePolicy::Natural);
     grid_view.set_vscroll_policy(gtk::ScrollablePolicy::Natural);
@@ -97,7 +97,7 @@ mod model {
 
     impl AnimationState {
         pub fn new() -> Self {
-            Object::new(&[])
+            Object::new()
         }
     }
 }
@@ -154,7 +154,7 @@ mod fixed_size {
 
     impl FixedSizeBin {
         pub fn new(animation: rlt::Animation) -> Self {
-            let obj: Self = Object::new(&[]);
+            let obj: Self = Object::new();
             animation.set_parent(&obj);
             obj.imp().0.set(animation).unwrap();
             obj
