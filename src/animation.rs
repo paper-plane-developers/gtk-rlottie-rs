@@ -33,7 +33,7 @@ mod imp {
         pub(super) loop_: Cell<bool>,
         pub(super) playing: Cell<bool>,
         pub(super) reversed: Cell<bool>,
-        pub(super) use_cache: Cell<bool>,
+        pub(super) skip_odd_frames: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -58,7 +58,7 @@ mod imp {
                         .maximum(1.0)
                         .build(),
                     glib::ParamSpecBoolean::builder("reversed").build(),
-                    glib::ParamSpecBoolean::builder("use-cache").build(),
+                    glib::ParamSpecBoolean::builder("skip-odd-frames").build(),
                 ]
             });
             PROPERTIES.as_ref()
@@ -72,7 +72,7 @@ mod imp {
                     (self.frame_num.get() as f64 / (self.totalframe.get() - 1) as f64).to_value()
                 }
                 "reversed" => self.reversed.get().to_value(),
-                "use-cache" => self.use_cache.get().to_value(),
+                "skip-odd-frames" => self.skip_odd_frames.get().to_value(),
                 _ => unimplemented!(),
             }
         }
@@ -93,9 +93,7 @@ mod imp {
                     self.obj().setup_frame(frame_num);
                 }
                 "reversed" => self.reversed.set(value.get().unwrap()),
-                "use-cache" => {
-                    // TODO: remove that
-                }
+                "skip-odd-frames" => self.skip_odd_frames.set(value.get().unwrap()),
                 _ => unimplemented!(),
             }
         }
@@ -215,6 +213,10 @@ impl Animation {
             let frame =
                 ((clock.frame_time() * 6) / 100000 - imp.frame_start.get()) as usize % totalframe;
 
+            if imp.skip_odd_frames.get() && frame % 2 == 1 {
+                return Continue(true);
+            }
+
             let prev_frame = imp.frame_num.get();
 
             if frame != prev_frame {
@@ -328,22 +330,6 @@ impl Animation {
         Self::from_file(&file)
     }
 
-    /// Return whether the animation is currently using cache.
-    pub fn use_cache(&self, value: bool) {
-        self.set_property("use-cache", value);
-    }
-
-    /// Set to use the cache or not.
-    ///
-    /// By default animation have the cache
-    /// it uses ram to reduse cpu usage
-    ///
-    /// and you can disable it when animation
-    /// plays once and don't need a cache
-    pub fn set_use_cache(&self, value: bool) {
-        self.set_property("use-cache", value);
-    }
-
     /// Reversed frame order.
     pub fn is_reversed(&self) -> bool {
         self.property("reversed")
@@ -362,6 +348,22 @@ impl Animation {
     /// Sets current progress.
     pub fn set_progress(&self, value: f64) {
         self.set_property("progress", value);
+    }
+
+    /// Gets if animation skips odd frames.
+    ///
+    /// Can be enabled for small animations to
+    /// improve performance and memory usage.
+    pub fn skip_odd_frames(&self) -> bool {
+        self.property("skip-odd-frames")
+    }
+
+    /// Sets whether to skip odd frames.
+    ///
+    /// Can be enabled for small animations to
+    /// improve performance and memory usage.
+    pub fn set_skip_odd_frames(&self, value: bool) {
+        self.set_property("skip-odd-frames", value);
     }
 
     // Media functions

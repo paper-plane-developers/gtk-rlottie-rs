@@ -24,7 +24,6 @@ fn build_ui(app: &gtk::Application) {
         let animation = rlt::Animation::from_filename(hand_animation_path);
         animation.set_halign(gtk::Align::Center);
         animation.set_loop(true);
-        animation.set_use_cache(false);
         animation.play();
         animation
     }
