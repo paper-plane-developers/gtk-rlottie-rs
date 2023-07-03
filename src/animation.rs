@@ -125,10 +125,9 @@ mod imp {
 
             let index = self.frame_num.get();
 
-            let texture =
-                widget
-                    .lock_cache_entry()
-                    .nearest_frame(width as usize, height as usize, index);
+            let texture = widget
+                .try_lock_cache_entry()
+                .and_then(|e| e.nearest_frame(width as usize, height as usize, index));
 
             if let Some(texture) = texture {
                 texture.snapshot(snapshot, width, height);
@@ -172,24 +171,11 @@ mod imp {
         fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
             self.parent_size_allocate(width, height, baseline);
 
-            let (sender, receiver) = glib::MainContext::channel(Default::default());
-
-            let obj = self.obj();
-
-            receiver.attach(
-                None,
-                clone!(@weak obj => @default-return Continue(false), move |_| {
-                    obj.queue_draw();
-                    Continue(false)
-                }),
-            );
-
-            self.obj().lock_cache_entry().request_frame_with_callback(
+            self.obj().request_frame_with_queue_draw(
                 width as usize,
                 height as usize,
                 self.frame_num.get(),
-                move |_| sender.send(()).unwrap(),
-            )
+            );
         }
     }
 
@@ -257,17 +243,37 @@ impl Animation {
 
         let totalframe = imp.totalframe.get();
 
-        let mut entry = self.lock_cache_entry();
+        if let Some(mut entry) = self.try_lock_cache_entry() {
+            for i in frame_num..(totalframe.min(frame_num + 5)) {
+                entry.request_frame(width, height, i);
+            }
 
-        for i in frame_num..(totalframe.min(frame_num + 5)) {
-            entry.request_frame(width, height, i);
+            self.request_draw(frame_num);
         }
-
-        self.request_draw(frame_num);
     }
 
-    fn lock_cache_entry(&self) -> std::sync::MutexGuard<'_, AnimationEntry> {
-        self.imp().cache_entry.get().unwrap().lock().unwrap()
+    fn try_lock_cache_entry(&self) -> Option<std::sync::MutexGuard<'_, AnimationEntry>> {
+        self.imp().cache_entry.get()?.lock().ok()
+    }
+
+    fn request_frame_with_queue_draw(&self, width: usize, height: usize, index: usize) {
+        let (sender, receiver) = glib::MainContext::channel(Default::default());
+
+        receiver.attach(
+            None,
+            clone!(@weak self as obj => @default-return Continue(false), move |_| {
+                obj.queue_draw();
+                Continue(false)
+            }),
+        );
+
+        if let Some(entry) = self.imp().cache_entry.get() {
+            let mut entry = entry.lock().unwrap();
+
+            entry.request_frame_with_callback(width, height, index, move |_| {
+                sender.send(()).unwrap()
+            })
+        }
     }
 
     pub fn request_draw(&self, frame_num: usize) {
