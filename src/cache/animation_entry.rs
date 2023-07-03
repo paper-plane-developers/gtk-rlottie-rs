@@ -46,29 +46,53 @@ impl AnimationEntry {
         }
     }
 
-    pub(crate) fn request_frame<F>(
+    pub(crate) fn request_frame(&mut self, width: usize, height: usize, index: usize) {
+        let collection = self
+            .frame_collections
+            .entry((width, height))
+            .or_insert_with(|| FrameCollection::new(self.info.totalframe));
+
+        if collection.frame(index).is_none() {
+            let request = FrameRequest {
+                size: (width, height),
+                frame_num: index,
+                callback: None,
+            };
+
+            if !self.requests.contains(&request) {
+                self.requests.push_back(request);
+            }
+        }
+    }
+
+    pub(crate) fn request_frame_with_callback<F>(
         &mut self,
         width: usize,
         height: usize,
         index: usize,
         callback: F,
     ) where
-        F: Fn(&gdk::MemoryTexture) + 'static + Send,
+        F: Fn(&gdk::MemoryTexture) + Send + 'static,
     {
         let collection = self
             .frame_collections
             .entry((width, height))
             .or_insert_with(|| FrameCollection::new(self.info.totalframe));
 
-        if let Some(frame) = collection.frame(index) {
-            callback(&frame);
+        if let Some(texture) = collection.frame(index) {
+            callback(&texture);
         } else {
-            let request = FrameRequest::new(width, height, index, callback);
+            let request = FrameRequest {
+                size: (width, height),
+                frame_num: index,
+                callback: Some(Box::new(callback)),
+            };
+
             self.requests.push_back(request);
         }
     }
 
-    pub(crate) fn frame_immediate(
+    pub(crate) fn frame(
         &self,
         width: usize,
         height: usize,
@@ -77,12 +101,16 @@ impl AnimationEntry {
         self.frame_collections.get(&(width, height))?.frame(index)
     }
 
-    pub(crate) fn nearest_frame_immediate(
+    pub(crate) fn nearest_frame(
         &self,
         width: usize,
         height: usize,
         index: usize,
     ) -> Option<gdk::MemoryTexture> {
+        if let Some(frame) = self.frame(width, height, index) {
+            return Some(frame);
+        }
+
         let find_nearest_frame = |collection: &FrameCollection| {
             let mut nearest_index = None;
 
@@ -99,52 +127,86 @@ impl AnimationEntry {
                 }
             }
 
-            if let Some(index) = nearest_index {
-                collection.frame(index)
-            } else {
-                None
-            }
+            nearest_index.map(|index| (index, collection.frame(index).unwrap()))
         };
 
+        let mut current = None;
+        let mut current_diff = usize::MAX;
+
+        let mut larger = None;
+        let mut larger_diff = usize::MAX;
+
+        let mut smaller = None;
+        let mut smaller_diff = usize::MAX;
+
         if let Some(current_collection) = self.frame_collections.get(&(width, height)) {
-            let frame = find_nearest_frame(current_collection);
-            if frame.is_some() {
-                return frame;
+            if let Some((i, frame)) = find_nearest_frame(current_collection) {
+                current_diff = i.abs_diff(index);
+                current = Some(frame);
             }
+        }
+
+        if current_diff <= 1 {
+            return current;
         }
 
         for key in self.frame_collections.keys().filter(|(w, _)| *w > width) {
             let collection = self.frame_collections.get(key).unwrap();
             let frame = find_nearest_frame(collection);
-            if frame.is_some() {
-                return frame;
+
+            if let Some((i, frame)) = frame {
+                if i.abs_diff(index) < larger_diff {
+                    larger_diff = i.abs_diff(index);
+                    larger = Some(frame)
+                }
             }
         }
 
         for collection in self.frame_collections.values() {
             let frame = find_nearest_frame(collection);
-            if frame.is_some() {
-                return frame;
+
+            if let Some((i, frame)) = frame {
+                if i.abs_diff(index) < smaller_diff {
+                    smaller_diff = i.abs_diff(index);
+                    smaller = Some(frame)
+                }
             }
         }
 
-        None
+        let (min_index, min_diff) = [current_diff, larger_diff, smaller_diff]
+            .into_iter()
+            .enumerate()
+            .min_by_key(|(_, val)| *val)
+            .unwrap();
+
+        if current_diff - min_diff <= 1 {
+            current
+        } else {
+            match min_index {
+                0 => current,
+                1 => larger,
+                2 => smaller,
+                _ => unreachable!(),
+            }
+        }
     }
 
     pub(crate) fn process_requests(&mut self) {
         while let Some(request) = self.requests.pop_front() {
-            if let Some(frame) = self
+            if let Some(texture) = self
                 .frame_collections
                 .get(&request.size)
                 .unwrap()
                 .frame(request.frame_num)
             {
-                (*request.callback)(&frame);
+                request.apply_callback(&texture)
             } else if self.processing.contains(&request) {
                 self.processing.push_back(request);
             } else {
                 let index = request.index();
+
                 self.processing.push_back(request);
+
                 let animation = self.animation.clone();
                 let sender = self.sender.clone();
                 std::thread::spawn(move || {
@@ -174,18 +236,7 @@ impl AnimationEntry {
     }
 
     pub(crate) fn finish_processed(&mut self) {
-        let mut frames = vec![];
-
-        while let Ok(frame) = self.receiver.try_recv() {
-            frames.push(frame);
-        }
-
-        if frames.len() > 1 {
-            // If we can have many frames in queue
-            dbg!(frames.len());
-        }
-
-        for (index, texture) in frames {
+        while let Ok((index, texture)) = self.receiver.try_recv() {
             self.frame_collections
                 .get(&index.size)
                 .unwrap()
@@ -193,7 +244,7 @@ impl AnimationEntry {
 
             self.processing.retain(|request| {
                 if request.index() == index {
-                    (*request.callback)(&texture);
+                    request.apply_callback(&texture);
                     false
                 } else {
                     true

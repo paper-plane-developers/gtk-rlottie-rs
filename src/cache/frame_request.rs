@@ -5,7 +5,7 @@ type FrameCallback = Box<dyn Fn(&gdk::MemoryTexture) + Send>;
 pub(crate) struct FrameRequest {
     pub(crate) size: (usize, usize),
     pub(crate) frame_num: usize,
-    pub(crate) callback: FrameCallback,
+    pub(crate) callback: Option<FrameCallback>,
 }
 
 impl std::fmt::Debug for FrameRequest {
@@ -26,21 +26,16 @@ impl PartialEq for FrameRequest {
 impl Eq for FrameRequest {}
 
 impl FrameRequest {
-    pub(crate) fn new<F>(width: usize, height: usize, index: usize, callback: F) -> Self
-    where
-        F: Fn(&gdk::MemoryTexture) + 'static + Send,
-    {
-        Self {
-            size: (width, height),
-            frame_num: index,
-            callback: Box::new(callback),
-        }
-    }
-
     pub(crate) fn index(&self) -> FrameRequestIndex {
         FrameRequestIndex {
             size: self.size,
             frame_num: self.frame_num,
+        }
+    }
+
+    pub(crate) fn apply_callback(&self, texture: &gdk::MemoryTexture) {
+        if let Some(callback) = &self.callback {
+            (*callback)(texture)
         }
     }
 }

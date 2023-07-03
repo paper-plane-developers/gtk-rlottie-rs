@@ -38,18 +38,6 @@ impl FrameCollection {
         }
     }
 
-    #[allow(unused)]
-    // I want to check if it can be useful
-    pub(super) fn set_many_frames<I>(&self, frames: I)
-    where
-        I: Iterator<Item = (usize, gdk::MemoryTexture)>,
-    {
-        let mut data = self.frames.write().unwrap();
-        for (index, frame) in frames {
-            data[index].replace(frame).unwrap();
-        }
-    }
-
     pub(super) fn lock_frames(
         &self,
     ) -> std::sync::RwLockReadGuard<'_, Box<[Option<gdk::MemoryTexture>]>> {

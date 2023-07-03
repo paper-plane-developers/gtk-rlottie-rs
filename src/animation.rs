@@ -125,18 +125,13 @@ mod imp {
 
             let index = self.frame_num.get();
 
-            let cache_entry = widget.lock_cache_entry();
+            let texture =
+                widget
+                    .lock_cache_entry()
+                    .nearest_frame(width as usize, height as usize, index);
 
-            if let Some(texture) =
-                cache_entry.frame_immediate(width as usize, height as usize, index)
-            {
+            if let Some(texture) = texture {
                 texture.snapshot(snapshot, width, height);
-            } else if let Some(texture) =
-                cache_entry.nearest_frame_immediate(width as usize, height as usize, index)
-            {
-                texture.snapshot(snapshot, width, height);
-            } else {
-                // dbg!("no texture");
             }
         }
 
@@ -176,6 +171,25 @@ mod imp {
 
         fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
             self.parent_size_allocate(width, height, baseline);
+
+            let (sender, receiver) = glib::MainContext::channel(Default::default());
+
+            let obj = self.obj();
+
+            receiver.attach(
+                None,
+                clone!(@weak obj => @default-return Continue(false), move |_| {
+                    obj.queue_draw();
+                    Continue(false)
+                }),
+            );
+
+            self.obj().lock_cache_entry().request_frame_with_callback(
+                width as usize,
+                height as usize,
+                self.frame_num.get(),
+                move |_| sender.send(()).unwrap(),
+            )
         }
     }
 
@@ -241,23 +255,13 @@ impl Animation {
         let width = (width * scale_factor) as usize;
         let height = (height * scale_factor) as usize;
 
-        // let cache_entry = self.lock_cache_entry();
+        let totalframe = imp.totalframe.get();
 
-        // if cache_entry.frame_immediate(width, height, index).is_some();
+        let mut entry = self.lock_cache_entry();
 
-        // let (sender, receiver) = glib::MainContext::channel(Default::default());
-
-        // receiver.attach(
-        //     None,
-        //     clone!(@weak self as obj => @default-return Continue(false), move |_| {
-        //         Continue(false)
-        //     }),
-        // );
-
-        self.lock_cache_entry()
-            .request_frame(width, height, frame_num, move |_texture| {
-                // sender.send(()).unwrap()
-            });
+        for i in frame_num..(totalframe.min(frame_num + 5)) {
+            entry.request_frame(width, height, i);
+        }
 
         self.request_draw(frame_num);
     }
