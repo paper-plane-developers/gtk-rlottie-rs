@@ -8,6 +8,7 @@ use std::time::Duration;
 use crate::cache::AnimationEntry;
 
 use glib::once_cell::sync::*;
+use std::cell::RefCell;
 use std::{
     cell::Cell,
     sync::{Arc, Mutex},
@@ -28,6 +29,8 @@ mod imp {
 
         pub(super) default_size: Cell<(i32, i32)>,
         pub(super) size: Cell<(f64, f64)>,
+
+        pub(super) last_texture: RefCell<Option<gdk::MemoryTexture>>,
 
         // fields for properties
         pub(super) loop_: Cell<bool>,
@@ -129,6 +132,9 @@ mod imp {
 
             if let Some(texture) = texture {
                 texture.snapshot(snapshot, width, height);
+                self.last_texture.replace(Some(texture));
+            } else if let Some(texture) = &*self.last_texture.borrow() {
+                texture.snapshot(snapshot, width, height)
             }
         }
 
