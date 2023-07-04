@@ -219,11 +219,21 @@ impl Animation {
         }
 
         if let Some(mut entry) = self.try_lock_cache_entry() {
-            for i in frame_num..(totalframe.min(frame_num + 5)) {
-                entry.request_frame(width, height, i);
-            }
+            entry.request_frame(width, height, frame_num);
 
             self.request_draw(frame_num);
+
+            let frame_shift = if imp.skip_odd_frames.get() { 2 } else { 1 };
+
+            let next = if imp.reversed.get() {
+                frame_num + frame_shift
+            } else {
+                frame_num.saturating_sub(frame_shift)
+            };
+
+            if next < totalframe {
+                entry.request_frame(width, height, next);
+            }
         }
     }
 
