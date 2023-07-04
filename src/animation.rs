@@ -251,6 +251,10 @@ impl Animation {
 
         let totalframe = imp.totalframe.get();
 
+        if width < 1 || height < 1 {
+            return;
+        }
+
         if let Some(mut entry) = self.try_lock_cache_entry() {
             for i in frame_num..(totalframe.min(frame_num + 5)) {
                 entry.request_frame(width, height, i);
@@ -309,8 +313,6 @@ impl Animation {
                 imp.frame_delay.set(info.frame_delay);
                 imp.totalframe.set(info.totalframe);
 
-                let (width, height) = info.default_size;
-                imp.size.set((width as f64, height as f64));
                 imp.default_size.set(info.default_size);
 
                 imp.obj().setup_frame(0);

@@ -193,6 +193,8 @@ impl AnimationEntry {
 
     pub(crate) fn process_requests(&mut self) {
         while let Some(request) = self.requests.pop_front() {
+            let mut indexes = vec![];
+
             if let Some(texture) = self
                 .frame_collections
                 .get(&request.size)
@@ -203,33 +205,36 @@ impl AnimationEntry {
             } else if self.processing.contains(&request) {
                 self.processing.push_back(request);
             } else {
-                let index = request.index();
-
+                indexes.push(request.index());
                 self.processing.push_back(request);
+            }
 
+            if !indexes.is_empty() {
                 let animation = self.animation.clone();
                 let sender = self.sender.clone();
                 std::thread::spawn(move || {
-                    let (width, height) = index.size;
-                    let size = rlottie::Size::new(width, height);
-                    let mut surface = rlottie::Surface::new(size);
+                    for index in indexes {
+                        let (width, height) = index.size;
+                        let size = rlottie::Size::new(width, height);
+                        let mut surface = rlottie::Surface::new(size);
 
-                    animation
-                        .lock()
-                        .unwrap()
-                        .render(index.frame_num, &mut surface);
+                        animation
+                            .lock()
+                            .unwrap()
+                            .render(index.frame_num, &mut surface);
 
-                    let data = glib::Bytes::from_owned(surface);
+                        let data = glib::Bytes::from_owned(surface);
 
-                    let texture = gdk::MemoryTexture::new(
-                        width as i32,
-                        height as i32,
-                        gdk::MemoryFormat::B8g8r8a8,
-                        &data,
-                        width * 4,
-                    );
+                        let texture = gdk::MemoryTexture::new(
+                            width as i32,
+                            height as i32,
+                            gdk::MemoryFormat::B8g8r8a8,
+                            &data,
+                            width * 4,
+                        );
 
-                    sender.send((index, texture)).unwrap();
+                        sender.send((index, texture)).unwrap();
+                    }
                 });
             }
         }
