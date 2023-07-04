@@ -1,11 +1,11 @@
-/**
- * Example with a lot of animations using GridView
- *
- * Use with gtk 4.8 for better performance
- *
- * I need to fix cache clearing
- * also some of animations not playing
- */
+//!
+//! Example with a lot of animations using GridView
+//!
+//! Use with gtk 4.8 for better performance
+//!
+//! I need to fix cache clearing
+//! also some of animations not playing
+//!
 use gtk::prelude::*;
 use gtk_rlottie as rlt; // I suggest to rename this package in dependencies
 
@@ -18,19 +18,21 @@ fn main() {
 }
 
 fn build_ui(app: &gtk::Application) {
-    fn create_animation() -> rlt::Animation {
-        let hand_animation_path = "examples/animations/AuthorizationStateWaitRegistration.tgs";
+    let stickers = std::path::Path::new("examples/animations");
+    assert!(stickers.is_dir());
 
-        let animation = rlt::Animation::from_filename(hand_animation_path);
-        animation.set_halign(gtk::Align::Center);
-        animation.set_loop(true);
-        animation.play();
-        animation
-    }
+    let paths: Vec<_> = stickers
+        .read_dir()
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.is_file())
+        .map(|p| p.to_str().unwrap().to_owned())
+        .take(50)
+        .collect();
 
-    let vector: Vec<model::AnimationState> = (0..100_000)
+    let vector: Vec<model::AnimationState> = (0..10_000)
         .into_iter()
-        .map(|_| model::AnimationState::new())
+        .map(|i| model::AnimationState::new(paths[i % paths.len()].clone()))
         .collect();
 
     let model = gtk::gio::ListStore::new(model::AnimationState::static_type());
@@ -40,12 +42,29 @@ fn build_ui(app: &gtk::Application) {
 
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(|_factory, list_item| {
-        let animation = create_animation();
-        let animation = fixed_size::FixedSizeBin::new(animation);
+        let animation = fixed_size::FixedSizeBin::new();
         list_item.set_child(Some(&animation));
     });
 
-    factory.connect_bind(|_, _| {});
+    factory.connect_bind(|_, list_item| {
+        let model = list_item
+            .item()
+            .and_downcast::<model::AnimationState>()
+            .unwrap();
+
+        let bin = list_item
+            .child()
+            .and_downcast::<fixed_size::FixedSizeBin>()
+            .unwrap();
+
+        let animation = rlt::Animation::from_filename(&model.path());
+
+        animation.set_halign(gtk::Align::Center);
+        animation.set_loop(true);
+        animation.play();
+
+        bin.set_child(animation);
+    });
 
     let selection_model = gtk::NoSelection::new(Some(model));
 
@@ -74,12 +93,16 @@ mod model {
     use super::*;
     use glib::Object;
     use gtk::glib;
+    use std::cell::OnceCell;
 
     mod imp {
+
         use super::*;
 
         #[derive(Default)]
-        pub struct AnimationState;
+        pub struct AnimationState {
+            pub(super) path: OnceCell<String>,
+        }
 
         #[glib::object_subclass]
         impl ObjectSubclass for AnimationState {
@@ -95,8 +118,14 @@ mod model {
     }
 
     impl AnimationState {
-        pub fn new() -> Self {
-            Object::new()
+        pub fn new(path: String) -> Self {
+            let obj: Self = Object::new();
+            obj.imp().path.set(path).unwrap();
+            obj
+        }
+
+        pub fn path(&self) -> String {
+            self.imp().path.get().unwrap().clone()
         }
     }
 }
@@ -105,14 +134,16 @@ mod fixed_size {
     use super::*;
     use glib::Object;
     use gtk::glib;
+    use std::cell::RefCell;
 
     mod imp {
-        use gtk::glib::once_cell::sync::OnceCell;
 
         use super::*;
 
         #[derive(Default)]
-        pub struct FixedSizeBin(pub(super) OnceCell<rlt::Animation>);
+        pub struct FixedSizeBin {
+            pub(super) child: RefCell<Option<rlt::Animation>>,
+        }
 
         #[glib::object_subclass]
         impl ObjectSubclass for FixedSizeBin {
@@ -121,13 +152,19 @@ mod fixed_size {
             type Type = super::FixedSizeBin;
         }
 
-        impl ObjectImpl for FixedSizeBin {}
+        impl ObjectImpl for FixedSizeBin {
+            fn dispose(&self) {
+                if let Some(child) = &*self.child.borrow() {
+                    child.unparent();
+                }
+            }
+        }
+
         impl WidgetImpl for FixedSizeBin {
             fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
-                self.0
-                    .get()
-                    .unwrap()
-                    .allocate(width, height, baseline, None);
+                if let Some(child) = &*self.child.borrow() {
+                    child.allocate(width, height, baseline, None);
+                }
             }
 
             fn request_mode(&self) -> gtk::SizeRequestMode {
@@ -135,13 +172,7 @@ mod fixed_size {
             }
 
             fn measure(&self, _: gtk::Orientation, _: i32) -> (i32, i32, i32, i32) {
-                (0, 30, -1, -1)
-            }
-        }
-
-        impl Drop for FixedSizeBin {
-            fn drop(&mut self) {
-                self.0.get().unwrap().unparent();
+                (0, 16, -1, -1)
             }
         }
     }
@@ -152,11 +183,18 @@ mod fixed_size {
     }
 
     impl FixedSizeBin {
-        pub fn new(animation: rlt::Animation) -> Self {
-            let obj: Self = Object::new();
-            animation.set_parent(&obj);
-            obj.imp().0.set(animation).unwrap();
-            obj
+        pub fn new() -> Self {
+            Object::new()
+        }
+
+        pub fn set_child(&self, child: rlt::Animation) {
+            child.set_parent(self);
+            if let Some(old_child) = self.imp().child.replace(Some(child)) {
+                old_child.unparent();
+            };
+
+            self.queue_allocate();
+            self.queue_draw();
         }
     }
 }
