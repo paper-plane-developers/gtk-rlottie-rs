@@ -111,6 +111,10 @@ mod imp {
                 .try_lock_cache_entry()
                 .and_then(|e| e.nearest_frame(width, height, self.frame_num.get()));
 
+            let inverse_scale_factor = 1.0 / widget.scale_factor() as f32;
+
+            snapshot.scale(inverse_scale_factor, inverse_scale_factor);
+
             if let Some(texture) = texture {
                 texture.snapshot(snapshot, width as f64, height as f64);
                 self.last_texture.replace(Some(texture));
