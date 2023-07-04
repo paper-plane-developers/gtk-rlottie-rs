@@ -28,7 +28,6 @@ mod imp {
         pub(super) totalframe: Cell<usize>,
 
         pub(super) default_size: Cell<(i32, i32)>,
-        pub(super) size: Cell<(f64, f64)>,
 
         pub(super) last_texture: RefCell<Option<gdk::MemoryTexture>>,
 
@@ -106,35 +105,17 @@ mod imp {
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
             let widget = self.obj();
 
-            let width = widget.width();
-            let height = widget.height();
-
-            let aspect_ratio = {
-                let (width, height) = self.default_size.get();
-                width as f64 / height as f64
-            };
-
-            let widget_aspect_ratio = width as f64 / height as f64;
-
-            let (width, height) = if aspect_ratio < widget_aspect_ratio {
-                (((height as f64) * aspect_ratio), height as f64)
-            } else {
-                (width as f64, ((width as f64) / aspect_ratio))
-            };
-
-            self.resize(width, height);
-
-            let index = self.frame_num.get();
+            let (width, height) = widget.render_size();
 
             let texture = widget
                 .try_lock_cache_entry()
-                .and_then(|e| e.nearest_frame(width as usize, height as usize, index));
+                .and_then(|e| e.nearest_frame(width, height, self.frame_num.get()));
 
             if let Some(texture) = texture {
-                texture.snapshot(snapshot, width, height);
+                texture.snapshot(snapshot, width as f64, height as f64);
                 self.last_texture.replace(Some(texture));
             } else if let Some(texture) = &*self.last_texture.borrow() {
-                texture.snapshot(snapshot, width, height)
+                texture.snapshot(snapshot, width as f64, height as f64)
             }
         }
 
@@ -173,31 +154,12 @@ mod imp {
         }
 
         fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
+            let obj = self.obj();
+
             self.parent_size_allocate(width, height, baseline);
 
-            self.obj().request_frame_with_queue_draw(
-                width as usize,
-                height as usize,
-                self.frame_num.get(),
-            );
-        }
-    }
-
-    impl Animation {
-        fn resize(&self, width: f64, height: f64) {
-            let aspect_ratio = width / height;
-
-            let (width, height) = if aspect_ratio <= 1.0 {
-                // width is smaller
-                (width, ((height) / aspect_ratio))
-            } else {
-                // height is smaller
-                (((width) / aspect_ratio), height)
-            };
-
-            if self.size.get() != (width, height) {
-                self.size.set((width, height));
-            }
+            let (width, height) = obj.render_size();
+            obj.request_frame_with_queue_draw(width, height, self.frame_num.get());
         }
     }
 }
@@ -244,12 +206,9 @@ impl Animation {
     fn setup_frame(&self, frame_num: usize) {
         let imp = self.imp();
 
-        let (width, height) = imp.size.get();
-        let scale_factor = self.scale_factor() as f64;
-        let width = (width * scale_factor) as usize;
-        let height = (height * scale_factor) as usize;
-
         let totalframe = imp.totalframe.get();
+
+        let (width, height) = self.render_size();
 
         if width < 1 || height < 1 {
             return;
@@ -286,6 +245,30 @@ impl Animation {
                 sender.send(()).unwrap()
             })
         }
+    }
+
+    fn render_size(&self) -> (usize, usize) {
+        let width = self.width() as f64;
+        let height = self.height() as f64;
+
+        let aspect_ratio = {
+            let (width, height) = self.imp().default_size.get();
+            width as f64 / height as f64
+        };
+
+        let widget_aspect_ratio = width as f64 / height as f64;
+
+        let (width, height) = if aspect_ratio < widget_aspect_ratio {
+            (((height as f64) * aspect_ratio), height as f64)
+        } else {
+            (width as f64, ((width as f64) / aspect_ratio))
+        };
+
+        let scale_factor = self.scale_factor() as f64;
+        let width = (width * scale_factor) as usize;
+        let height = (height * scale_factor) as usize;
+
+        (width, height)
     }
 
     pub fn request_draw(&self, frame_num: usize) {
