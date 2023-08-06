@@ -6,7 +6,7 @@
  * I need to fix cache clearing
  * also some of animations not playing
  */
-use gtk::prelude::*;
+use gtk::{gio, prelude::*};
 use gtk_rlottie as rlt; // I suggest to rename this package in dependencies
 
 const APP_ID: &str = "com.github.yuraiz.RltHello";
@@ -34,7 +34,7 @@ fn build_ui(app: &gtk::Application) {
         .map(|_| model::AnimationState::new())
         .collect();
 
-    let model = gtk::gio::ListStore::new(model::AnimationState::static_type());
+    let model = gio::ListStore::new::<AnimationState>();
 
     // Add the vector to the model
     model.extend_from_slice(&vector);
@@ -70,6 +70,8 @@ fn build_ui(app: &gtk::Application) {
 }
 
 use gtk::subclass::prelude::*;
+
+use crate::model::AnimationState;
 
 mod model {
     use super::*;

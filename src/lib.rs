@@ -239,7 +239,7 @@ glib::wrapper! {
 }
 
 impl Animation {
-    fn tick(&self, clock: &gdk::FrameClock) -> Continue {
+    fn tick(&self, clock: &gdk::FrameClock) -> glib::ControlFlow {
         let imp = self.imp();
 
         if imp.use_cache.get() && !imp.cache_dropped.get() {
@@ -247,7 +247,7 @@ impl Animation {
                 let elapsed = instant.elapsed();
                 if elapsed.as_secs() > 1 {
                     imp.drop_cache();
-                    return Continue(true);
+                    return glib::ControlFlow::Continue;
                 }
             }
         }
@@ -274,7 +274,7 @@ impl Animation {
             }
         }
 
-        Continue(true)
+        glib::ControlFlow::Continue
     }
 
     fn setup_frame(&self, frame_num: usize) {
@@ -303,7 +303,7 @@ impl Animation {
                         imp.obj().request_draw(index);
                         imp.cache_dropped.set(false);
 
-                        glib::Continue(false)
+                        glib::ControlFlow::Break
                     }),
                 );
 
@@ -344,7 +344,7 @@ impl Animation {
 
         receiver.attach(
             None,
-            clone!(@weak self as obj => @default-return glib::Continue(false), move |animation_info| {
+            clone!(@weak self as obj => @default-return glib::ControlFlow::Break, move |animation_info| {
                 let imp = obj.imp();
 
                 let AnimationInfo { totalframe, default_size, frame_delay} = animation_info;
@@ -364,7 +364,7 @@ impl Animation {
                 imp.obj().setup_frame(0);
                 imp.obj().add_tick_callback(Self::tick);
 
-                glib::Continue(false)
+                glib::ControlFlow::Break
             }),
         );
 

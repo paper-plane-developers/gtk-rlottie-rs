@@ -6,6 +6,6 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-gtk =  { version = "0.6", package = "gtk4" }
+gtk =  { version = "0.7", package = "gtk4" }
 rlottie = "0.5.1"
 flate2 = "1.0.24"
