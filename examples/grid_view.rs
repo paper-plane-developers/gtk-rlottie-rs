@@ -6,7 +6,8 @@
  * I need to fix cache clearing
  * also some of animations not playing
  */
-use gtk::{gio, prelude::*};
+use gtk::gio;
+use gtk::prelude::*;
 use gtk_rlottie as rlt; // I suggest to rename this package in dependencies
 
 const APP_ID: &str = "com.github.yuraiz.RltHello";
@@ -74,9 +75,10 @@ use gtk::subclass::prelude::*;
 use crate::model::AnimationState;
 
 mod model {
-    use super::*;
     use glib::Object;
     use gtk::glib;
+
+    use super::*;
 
     mod imp {
         use super::*;
@@ -105,9 +107,10 @@ mod model {
 }
 
 mod fixed_size {
-    use super::*;
     use glib::Object;
     use gtk::glib;
+
+    use super::*;
 
     mod imp {
         use gtk::glib::once_cell::sync::OnceCell;

@@ -6,6 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+async-channel = "2"
 gtk =  { version = "0.8", package = "gtk4" }
 rlottie = "0.5"
 flate2 = "1"

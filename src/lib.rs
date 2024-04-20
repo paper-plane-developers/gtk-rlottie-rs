@@ -1,24 +1,27 @@
-use glib::clone;
-use gtk::prelude::*;
-use gtk::subclass::prelude::*;
-use gtk::{gdk, gio, glib};
+use std::cell::Cell;
+use std::cell::RefCell;
+use std::io::Read;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use flate2::read::GzDecoder;
-use std::io::Read;
-use std::time::Duration;
+use glib::clone;
+use gtk::gdk;
+use gtk::gio;
+use gtk::glib;
+use gtk::prelude::*;
+use gtk::subclass::prelude::*;
 
 #[derive(Debug)]
 struct RenderInfo {
     frame_num: usize,
     width: i32,
     height: i32,
-    sender: glib::Sender<(usize, gdk::MemoryTexture)>,
+    sender: async_channel::Sender<(usize, gdk::MemoryTexture)>,
 }
 
 mod imp {
     use super::*;
-    use glib::once_cell::sync::*;
-    use std::cell::{Cell, RefCell};
 
     #[derive(Default, Debug)]
     pub struct Animation {
@@ -59,7 +62,8 @@ mod imp {
         }
 
         fn properties() -> &'static [glib::ParamSpec] {
-            static PROPERTIES: Lazy<Vec<glib::ParamSpec>> = Lazy::new(|| {
+            static PROPERTIES: OnceLock<Vec<glib::ParamSpec>> = OnceLock::new();
+            PROPERTIES.get_or_init(|| {
                 vec![
                     glib::ParamSpecBoolean::builder("loop").build(),
                     glib::ParamSpecBoolean::builder("playing").build(),
@@ -70,8 +74,7 @@ mod imp {
                     glib::ParamSpecBoolean::builder("reversed").build(),
                     glib::ParamSpecBoolean::builder("use-cache").build(),
                 ]
-            });
-            PROPERTIES.as_ref()
+            })
         }
 
         fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
@@ -287,25 +290,20 @@ impl Animation {
 
         if let Ok(cache) = imp.cache.try_borrow() {
             if ignore_cache || cache[frame_num].is_none() {
-                let (sender, receiver) =
-                    glib::MainContext::channel::<(usize, gdk::MemoryTexture)>(Default::default());
+                let (sender, receiver) = async_channel::unbounded::<(usize, gdk::MemoryTexture)>();
 
-                receiver.attach(
-                    None,
-                    clone!(@to-owned imp => move |(frame_num, texture)| {
+                glib::spawn_future_local(clone!(@to-owned imp => async move {
+                    if let Ok((frame_num, texture)) = receiver.recv().await {
                         if imp.cache_is_out_of_date.take() {
                             imp.cache.replace(vec![None; imp.totalframe.get()]);
                         }
-
 
                         let index = if imp.use_cache.get() { frame_num } else { 0 };
                         imp.cache.borrow_mut()[index] = Some(texture);
                         imp.obj().request_draw(index);
                         imp.cache_dropped.set(false);
-
-                        glib::ControlFlow::Break
-                    }),
-                );
+                    }
+                }));
 
                 if let Some(ref render_sender) = *imp.render_sender.borrow() {
                     let (width, height) = imp.size.get();
@@ -340,11 +338,10 @@ impl Animation {
             frame_delay: Duration,
         }
 
-        let (sender, receiver) = glib::MainContext::channel::<AnimationInfo>(Default::default());
+        let (sender, receiver) = async_channel::unbounded::<AnimationInfo>();
 
-        receiver.attach(
-            None,
-            clone!(@weak self as obj => @default-return glib::ControlFlow::Break, move |animation_info| {
+        glib::spawn_future_local(clone!(@weak self as obj => async move {
+            if let Ok(animation_info) = receiver.recv().await {
                 let imp = obj.imp();
 
                 let AnimationInfo { totalframe, default_size, frame_delay} = animation_info;
@@ -363,10 +360,8 @@ impl Animation {
 
                 imp.obj().setup_frame(0);
                 imp.obj().add_tick_callback(Self::tick);
-
-                glib::ControlFlow::Break
-            }),
-        );
+            }
+        }));
 
         let (render_sender, render_receiver) = std::sync::mpsc::channel::<RenderInfo>();
 
@@ -404,7 +399,9 @@ impl Animation {
                 default_size: (size.width as i32, size.height as i32),
             };
 
-            sender.send(animation_info).unwrap();
+            glib::spawn_future(clone!(@strong sender => async move {
+                _ = sender.send(animation_info).await;
+            }));
 
             while let Ok(render_info) = render_receiver.recv() {
                 let RenderInfo {
@@ -429,7 +426,9 @@ impl Animation {
                     width as usize * 4,
                 );
 
-                sender.send((frame_num, texture)).unwrap();
+                glib::spawn_future(clone!(@strong sender => async move {
+                    _ = sender.send((frame_num, texture)).await;
+                }));
             }
         });
     }
