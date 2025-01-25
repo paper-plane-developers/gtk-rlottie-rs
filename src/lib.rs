@@ -399,7 +399,7 @@ impl Animation {
                 default_size: (size.width as i32, size.height as i32),
             };
 
-            glib::spawn_future(clone!(@strong sender => async move {
+            glib::spawn_future(clone!(#[strong] sender, async move {
                 _ = sender.send(animation_info).await;
             }));
 
